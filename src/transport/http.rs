@@ -64,7 +64,7 @@ type Sender = SendRequest<Full<Bytes>>;
 /// 1 つの REST ベースのアイドル接続。
 ///
 /// 共有ではなく所有である。リクエストは接続を取り出し、やり取りの間ずっと
-/// 排他的に所有し、応答を完全に読み終えて接続がまだ使えるときだけ戻す。
+/// 排他的に所有し、応答を完全に読み終えて接続が閉じていないときだけ戻す。
 /// 2 つのリクエストが同時に 1 本の接続を使うことはない。`Mutex` が守るのは
 /// アイドルスタックの push と pop だけで、`.await` をまたいで保持されない
 /// `std` のミューテックスである。
@@ -180,7 +180,10 @@ pub(crate) async fn round_trip(
         .await;
         match outcome {
             Ok(Ok(response)) => {
-                if sender.is_ready() && !sender.is_closed() {
+                // `is_ready()` は hyper の接続タスクが次に動くまで偽のことが
+                // あり、再利用できる接続を捨ててしまう。準備は次の取り出しが
+                // `ready().await` で待つ。
+                if !sender.is_closed() {
                     route.pool.checkin(sender);
                 }
                 return Ok(response);

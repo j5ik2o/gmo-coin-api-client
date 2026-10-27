@@ -442,3 +442,24 @@ fn plain_http_is_only_for_loopback() {
         assert_eq!(err.primitive, Primitive::BaseUrl, "{url}");
     }
 }
+
+/// マルチスレッドのランタイムでは、応答を読み終えた直後に hyper の接続
+/// タスクがまだ動いておらず、接続が「準備できていない」ことがある。それでも
+/// 閉じていない接続はプールに戻り、次の呼び出しが準備を待って再利用する。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sequential_calls_on_a_multi_thread_runtime_reuse_one_connection() {
+    let mock = MockExchange::start().await;
+    mock.on("GET", "/public/v1/status")
+        .times(50)
+        .fixture("public_get_status.json");
+    let client = mock.client();
+    for _ in 0..50 {
+        client.status().await.unwrap();
+    }
+    assert_eq!(
+        mock.http_connections(),
+        1,
+        "fifty sequential calls share one pooled connection"
+    );
+    mock.assert_done();
+}
