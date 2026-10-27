@@ -56,6 +56,8 @@ struct State {
     unmatched: Vec<usize>,
     tokens: TokenStore,
     ws: ws::Hub,
+    /// hyper に渡した TCP 接続の数。接続プールの検証に使う。
+    http_connections: usize,
 }
 
 struct Route {
@@ -256,6 +258,11 @@ impl MockExchange {
         self.lock().requests.clone()
     }
 
+    /// これまでに受け付けた HTTP 接続の数 (WebSocket は含まない)。
+    pub fn http_connections(&self) -> usize {
+        self.lock().http_connections
+    }
+
     pub fn ws(&self) -> WsControl {
         WsControl::new(self.state.clone())
     }
@@ -344,6 +351,10 @@ async fn serve(socket: tokio::net::TcpStream, state: Arc<Mutex<State>>) {
     if text.contains("upgrade: websocket") {
         ws::serve(socket, state).await;
     } else {
+        state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .http_connections += 1;
         http::serve(socket, state).await;
     }
 }

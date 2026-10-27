@@ -104,6 +104,11 @@ async fn pooled_connections_are_reused_across_calls() {
     for _ in 0..3 {
         client.status().await.unwrap();
     }
+    assert_eq!(
+        mock.http_connections(),
+        1,
+        "three sequential calls share one pooled connection"
+    );
     mock.assert_done();
 }
 
