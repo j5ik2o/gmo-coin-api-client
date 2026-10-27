@@ -281,21 +281,33 @@ type DialFuture = Pin<Box<dyn Future<Output = Dialed> + Send>>;
 /// 進行中の `PUT ws-auth`。送った時刻と結果を返す。
 type ExtendFuture = Pin<Box<dyn Future<Output = (Instant, Result<()>)> + Send>>;
 
-/// 接続試行の結果。`acquired` は試行の中で新しく発行されたトークンで、
-/// 接続の成否にかかわらずセッションに引き取られる (401/403/404 を除く)。
+/// 接続試行の結果。
 struct Dialed {
     result: core::result::Result<WsStream, DialFailure>,
-    acquired: Option<TokenLease>,
+    token: TokenSource,
+}
+
+/// この試行で使ったトークンの出所。ハンドシェイクがトークンを拒んだとき、
+/// 次に何をするかはこれで決まる。
+enum TokenSource {
+    /// Public、または取得に失敗した、または試行の中で削除した。
+    None,
+    /// 前の試行で発行したリースを再利用した。
+    Reused,
+    /// この試行で発行した。接続の成否にかかわらずセッションが引き取る。
+    Fresh(TokenLease),
 }
 
 enum DialFailure {
-    /// フィードを終える: `Api`、`Contract`、メンテナンス以外の `Protocol`。
+    /// フィードを終える: `Api`、`Contract`、メンテナンス以外の `Protocol`、
+    /// この試行で発行したトークンのハンドシェイクでの拒否。
     Terminal(Error),
     /// `Disconnected` を返してバックオフ後に再試行する。
-    Retry {
-        reason: DisconnectReason,
-        token_dead: bool,
-    },
+    Retry(DisconnectReason),
+    /// 再利用したトークンをハンドシェイクが 401/403/404 で拒んだ。リースは
+    /// 死んだものとして捨て、次の試行が取り直す。新しいトークンの拒否は
+    /// 接続試行の中で `Terminal` になるので、ここには来ない。
+    ReusedTokenRejected { http_status: u16 },
 }
 
 pub(crate) struct Session<C: FeedChannel> {
@@ -323,13 +335,26 @@ enum Auth {
     },
 }
 
+impl Auth {
+    /// 試行の中で発行されたトークンを引き取る。接続の成否は問わない。
+    fn adopt(&mut self, token: TokenSource) {
+        if let (Auth::Private { lease, .. }, TokenSource::Fresh(acquired)) = (self, token) {
+            *lease = Some(acquired);
+        }
+    }
+}
+
 /// # 不変条件
 /// `extend_at <= expires_at`。両方とも取得または延長の要求を「送った」時刻
 /// から計算するので、決して過大にならない。`extend_at == expires_at` は
 /// 「もう延長しない」を意味し、次の接続でトークンを取り直す。
+///
+/// # 残存リスク
+/// トークンの所有者はセッションだけなので、`close` は常に削除できる。
+/// 接続試行は接続先パス (ゼロ埋めされる `String`) を、延長は `PUT` の本文の
+/// ための複製 (`AccessToken`、ゼロ埋めされる) を持つ。
 struct TokenLease {
-    /// 接続試行と延長の future が借りるので `Arc`。複製はされない。
-    token: Arc<AccessToken>,
+    token: AccessToken,
     extend_at: Instant,
     expires_at: Instant,
 }
@@ -354,7 +379,7 @@ impl Default for LeaseSchedule {
 }
 
 impl TokenLease {
-    fn new(token: Arc<AccessToken>, sent_at: Instant, schedule: LeaseSchedule) -> Self {
+    fn new(token: AccessToken, sent_at: Instant, schedule: LeaseSchedule) -> Self {
         Self {
             token,
             extend_at: sent_at + schedule.extend_after,
@@ -364,6 +389,16 @@ impl TokenLease {
 
     fn is_live(&self, now: Instant) -> bool {
         now < self.expires_at
+    }
+
+    /// Private WebSocket の接続先パス。
+    fn path(&self) -> Zeroizing<String> {
+        Zeroizing::new(format!("{OPERATION}/{}", self.token.reveal()))
+    }
+
+    /// 延長の future に渡す複製。
+    fn token_copy(&self) -> AccessToken {
+        AccessToken::parse(self.token.reveal()).expect("a copy of a parsed token")
     }
 }
 
@@ -511,6 +546,14 @@ fn next_command<C: FeedChannel>(
         })
 }
 
+fn protocol_error(api: ApiGroup, kind: ProtocolErrorKind) -> Error {
+    Error::Protocol(ProtocolError {
+        api,
+        operation: OPERATION,
+        kind,
+    })
+}
+
 fn transport_error(api: ApiGroup, kind: TransportErrorKind, delivery: Delivery) -> TransportError {
     TransportError {
         api,
@@ -524,22 +567,23 @@ fn live_failure(api: ApiGroup, kind: TransportErrorKind) -> DisconnectReason {
     DisconnectReason::Transport(transport_error(api, kind, Delivery::MaybeSent))
 }
 
-/// ハンドシェイクの失敗を再試行の理由に写す。
+/// ハンドシェイクの失敗を再試行の理由に写す。トークンの拒否 (Private の
+/// 401/403/404) は出所で意味が変わるので、接続試行が先に扱う。
 fn dial_failure(api: ApiGroup, e: WsConnectError) -> DialFailure {
-    match e {
-        WsConnectError::Transport(kind) => DialFailure::Retry {
-            reason: DisconnectReason::Transport(transport_error(api, kind, Delivery::NotSent)),
-            token_dead: false,
-        },
-        WsConnectError::Rejected { http_status: 503 } => DialFailure::Retry {
-            reason: DisconnectReason::Maintenance,
-            token_dead: false,
-        },
-        WsConnectError::Rejected { http_status } => DialFailure::Retry {
-            reason: DisconnectReason::HandshakeRejected { http_status },
-            token_dead: api == ApiGroup::PrivateWs && matches!(http_status, 401 | 403 | 404),
-        },
-    }
+    DialFailure::Retry(match e {
+        WsConnectError::Transport(kind) => {
+            DisconnectReason::Transport(transport_error(api, kind, Delivery::NotSent))
+        }
+        WsConnectError::Rejected { http_status: 503 } => DisconnectReason::Maintenance,
+        WsConnectError::Rejected { http_status } => {
+            DisconnectReason::HandshakeRejected { http_status }
+        }
+    })
+}
+
+/// 取引所がトークンを拒んだとみなす HTTP 状態。
+fn rejects_token(http_status: u16) -> bool {
+    matches!(http_status, 401 | 403 | 404)
 }
 
 /// `POST ws-auth` の失敗。メンテナンス (ERR-5201/5202/5203、または
@@ -550,17 +594,14 @@ fn acquire_failure(e: Error) -> DialFailure {
         ErrorCode::EMERGENCY_MAINTENANCE,
         ErrorCode::PRE_OPEN,
     ];
-    let maintenance = DialFailure::Retry {
-        reason: DisconnectReason::Maintenance,
-        token_dead: false,
-    };
     match e {
-        Error::Api(api) if MAINTENANCE.iter().any(|code| api.has(*code)) => maintenance,
-        Error::Protocol(p) if *p.kind() == ProtocolErrorKind::HttpStatus(503) => maintenance,
-        Error::Transport(t) => DialFailure::Retry {
-            reason: DisconnectReason::Transport(t),
-            token_dead: false,
-        },
+        Error::Api(api) if MAINTENANCE.iter().any(|code| api.has(*code)) => {
+            DialFailure::Retry(DisconnectReason::Maintenance)
+        }
+        Error::Protocol(p) if *p.kind() == ProtocolErrorKind::HttpStatus(503) => {
+            DialFailure::Retry(DisconnectReason::Maintenance)
+        }
+        Error::Transport(t) => DialFailure::Retry(DisconnectReason::Transport(t)),
         other => DialFailure::Terminal(other),
     }
 }
@@ -611,9 +652,7 @@ impl<C: FeedChannel> Session<C> {
 
     /// 接続試行の結果を状態に写す。`None` なら呼び出し側はループを続ける。
     fn dialed(&mut self, dialed: Dialed) -> Option<Result<<C as Codec>::Event>> {
-        if let (Auth::Private { lease, .. }, Some(acquired)) = (&mut self.auth, dialed.acquired) {
-            *lease = Some(acquired);
-        }
+        self.auth.adopt(dialed.token);
         match dialed.result {
             Ok(stream) => {
                 let now = Instant::now();
@@ -635,12 +674,15 @@ impl<C: FeedChannel> Session<C> {
                 self.state = State::Closed;
                 Some(Err(e))
             }
-            Err(DialFailure::Retry { reason, token_dead }) => {
-                if token_dead && let Auth::Private { lease, .. } = &mut self.auth {
+            Err(DialFailure::ReusedTokenRejected { http_status }) => {
+                if let Auth::Private { lease, .. } = &mut self.auth {
                     *lease = None;
                 }
-                Some(Ok(self.disconnected(reason)))
+                Some(Ok(self.disconnected(DisconnectReason::HandshakeRejected {
+                    http_status,
+                })))
             }
+            Err(DialFailure::Retry(reason)) => Some(Ok(self.disconnected(reason))),
         }
     }
 
@@ -745,11 +787,7 @@ impl<C: FeedChannel> Session<C> {
                 }
                 Err(kind) => {
                     self.state = State::Closed;
-                    Some(Err(Error::Protocol(ProtocolError {
-                        api: C::API,
-                        operation: OPERATION,
-                        kind,
-                    })))
+                    Some(Err(protocol_error(C::API, kind)))
                 }
             },
             Step::Message(Message::Binary(_)) => Some(Ok(self.drop_connection(live_failure(
@@ -810,7 +848,14 @@ impl<C: FeedChannel> Session<C> {
     /// 保存でき、キャンセルの後に再開できる。
     ///
     /// Private: 生きているリースがあればそのトークンで接続する。なければ
-    /// `POST ws-auth` で取得し、新しいリースを結果に載せる。
+    /// `POST ws-auth` で取得し、新しいリースを結果に載せる。ハンドシェイクが
+    /// トークンを拒んだら (401/403/404):
+    /// - この試行で発行したトークンなら、取引所が発行したばかりのものを
+    ///   拒んでいる。設定の問題なので `DELETE` してから `Terminal`
+    ///   (`Protocol(WsHandshake)`) で終える。`DELETE` の失敗は報告する
+    ///   エラーを変えない。トークンは 60 分以内に失効する。
+    /// - 再利用したトークンなら `ReusedTokenRejected`。セッションがリースを
+    ///   捨て、次の試行が取り直す。
     fn dial(&mut self) -> DialFuture {
         let inner = self.inner.clone();
         match &self.auth {
@@ -826,7 +871,7 @@ impl<C: FeedChannel> Session<C> {
                 .map_err(|e| dial_failure(ApiGroup::PublicWs, e));
                 Dialed {
                     result,
-                    acquired: None,
+                    token: TokenSource::None,
                 }
             }),
             Auth::Private {
@@ -837,31 +882,29 @@ impl<C: FeedChannel> Session<C> {
             } => {
                 let client = client.clone();
                 let schedule = *schedule;
-                let live = lease
+                let reused = lease
                     .as_ref()
                     .filter(|l| l.is_live(Instant::now()))
-                    .map(|l| l.token.clone());
+                    .map(TokenLease::path);
                 Box::pin(async move {
-                    let (token, acquired) = match live {
-                        Some(token) => (token, None),
+                    let (path, source) = match reused {
+                        Some(path) => (path, TokenSource::Reused),
                         None => {
                             let sent_at = Instant::now();
                             match client.acquire_ws_token().await {
                                 Ok(token) => {
-                                    let token = Arc::new(token);
-                                    let lease = TokenLease::new(token.clone(), sent_at, schedule);
-                                    (token, Some(lease))
+                                    let lease = TokenLease::new(token, sent_at, schedule);
+                                    (lease.path(), TokenSource::Fresh(lease))
                                 }
                                 Err(e) => {
                                     return Dialed {
                                         result: Err(acquire_failure(e)),
-                                        acquired: None,
+                                        token: TokenSource::None,
                                     };
                                 }
                             }
                         }
                     };
-                    let path = Zeroizing::new(format!("{OPERATION}/{}", token.reveal()));
                     let result = ws::connect(
                         &inner.connector,
                         inner.endpoints.private_ws.base(),
@@ -869,9 +912,38 @@ impl<C: FeedChannel> Session<C> {
                         &inner.config.timeouts,
                         &inner.config.limits,
                     )
-                    .await
-                    .map_err(|e| dial_failure(ApiGroup::PrivateWs, e));
-                    Dialed { result, acquired }
+                    .await;
+                    match (result, source) {
+                        (Ok(stream), token) => Dialed {
+                            result: Ok(stream),
+                            token,
+                        },
+                        (
+                            Err(WsConnectError::Rejected { http_status }),
+                            TokenSource::Fresh(lease),
+                        ) if rejects_token(http_status) => {
+                            let _ = client.delete_ws_token(lease.token).await;
+                            Dialed {
+                                result: Err(DialFailure::Terminal(protocol_error(
+                                    ApiGroup::PrivateWs,
+                                    ProtocolErrorKind::WsHandshake { http_status },
+                                ))),
+                                token: TokenSource::None,
+                            }
+                        }
+                        (Err(WsConnectError::Rejected { http_status }), token)
+                            if rejects_token(http_status) =>
+                        {
+                            Dialed {
+                                result: Err(DialFailure::ReusedTokenRejected { http_status }),
+                                token,
+                            }
+                        }
+                        (Err(e), token) => Dialed {
+                            result: Err(dial_failure(ApiGroup::PrivateWs, e)),
+                            token,
+                        },
+                    }
                 })
             }
         }
@@ -890,7 +962,7 @@ impl<C: FeedChannel> Session<C> {
             return;
         };
         let client = client.clone();
-        let token = lease.token.clone();
+        let token = lease.token_copy();
         let sent_at = Instant::now();
         *extend = Some(Box::pin(async move {
             (sent_at, client.extend_ws_token(&token).await)
@@ -931,11 +1003,7 @@ impl<C: FeedChannel> Session<C> {
             State::Connected(conn, _) => Some(conn.stream),
             State::Dialing(fut) => {
                 let dialed = fut.await;
-                if let (Auth::Private { lease, .. }, Some(acquired)) =
-                    (&mut self.auth, dialed.acquired)
-                {
-                    *lease = Some(acquired);
-                }
+                self.auth.adopt(dialed.token);
                 dialed.result.ok()
             }
             State::Idle | State::Waiting { .. } | State::Closed => None,
@@ -953,16 +1021,12 @@ impl<C: FeedChannel> Session<C> {
         if let Auth::Private {
             client,
             lease: Some(lease),
-            extend,
             ..
         } = self.auth
             && lease.is_live(Instant::now())
         {
-            drop(extend);
-            if let Ok(token) = Arc::try_unwrap(lease.token) {
-                let deleted = client.delete_ws_token(token).await;
-                outcome = outcome.and(deleted);
-            }
+            let deleted = client.delete_ws_token(lease.token).await;
+            outcome = outcome.and(deleted);
         }
         outcome
     }
@@ -1185,40 +1249,22 @@ mod tests {
     }
 
     #[test]
-    fn a_dead_private_token_is_only_the_documented_statuses() {
-        for status in [401, 403, 404] {
-            assert!(matches!(
-                dial_failure(
-                    ApiGroup::PrivateWs,
-                    WsConnectError::Rejected {
-                        http_status: status
-                    }
-                ),
-                DialFailure::Retry {
-                    token_dead: true,
-                    reason: DisconnectReason::HandshakeRejected { .. }
-                }
-            ));
-        }
+    fn a_token_is_rejected_only_by_the_documented_statuses() {
+        assert!([401, 403, 404].into_iter().all(rejects_token));
+        assert!(![400, 429, 500, 503].into_iter().any(rejects_token));
         assert!(matches!(
             dial_failure(
                 ApiGroup::PrivateWs,
                 WsConnectError::Rejected { http_status: 503 }
             ),
-            DialFailure::Retry {
-                token_dead: false,
-                reason: DisconnectReason::Maintenance
-            }
+            DialFailure::Retry(DisconnectReason::Maintenance)
         ));
         assert!(matches!(
             dial_failure(
                 ApiGroup::PublicWs,
                 WsConnectError::Rejected { http_status: 404 }
             ),
-            DialFailure::Retry {
-                token_dead: false,
-                ..
-            }
+            DialFailure::Retry(DisconnectReason::HandshakeRejected { http_status: 404 })
         ));
     }
 

@@ -9,7 +9,7 @@ mod support;
 
 use std::time::{Duration, Instant};
 
-use gmo_coin_api_client::error::{Phase, TransportErrorKind};
+use gmo_coin_api_client::error::{Phase, ProtocolErrorKind, TransportErrorKind};
 use gmo_coin_api_client::ws::{
     DisconnectReason, PrivateChannel, PrivateEvent, PublicChannel, PublicEvent,
 };
@@ -427,6 +427,136 @@ async fn a_private_token_rejected_at_reconnect_is_reacquired() {
         vec![first[0].clone(), issued[1].clone()],
         "close deleted the second token"
     );
+}
+
+/// `next` を数ミリ秒ごとに打ち切りながら、次のイベントまで進める。
+async fn next_under_cancellation<C: gmo_coin_api_client::ws::FeedChannel>(
+    feed: &mut gmo_coin_api_client::ws::Feed<C>,
+) -> gmo_coin_api_client::Result<C::Event> {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        if let Ok(event) = tokio::time::timeout(Duration::from_millis(2), feed.next()).await {
+            return event;
+        }
+        assert!(Instant::now() < deadline, "no event within {WAIT:?}");
+    }
+}
+
+fn ws_auth_methods(mock: &MockExchange) -> Vec<String> {
+    mock.requests()
+        .into_iter()
+        .filter(|r| r.path == "/private/v1/ws-auth")
+        .map(|r| r.method)
+        .collect()
+}
+
+/// この試行で発行したトークンをハンドシェイクが拒むのは設定の問題である。
+/// フィードは削除してから終端エラーで終わり、トークンを発行し続けない。
+#[tokio::test]
+async fn a_fresh_token_rejected_at_the_handshake_is_deleted_and_ends_the_feed() {
+    let mock = MockExchange::start().await;
+    let ws = mock.ws();
+    ws.reject_private_handshakes(Some(403));
+    let client = fast_client(&mock, |_| {}).authenticate(MockExchange::credentials());
+    let mut feed = client.private_feed();
+    feed.subscribe(PrivateChannel::OrderEvents).unwrap();
+
+    match next_under_cancellation(&mut feed).await {
+        Err(Error::Protocol(p)) => assert_eq!(
+            *p.kind(),
+            ProtocolErrorKind::WsHandshake { http_status: 403 },
+            "{p:?}"
+        ),
+        other => panic!("{other:?}"),
+    }
+    assert!(matches!(feed.next().await, Err(Error::FeedClosed)));
+
+    assert_eq!(ws_auth_methods(&mock), ["POST", "DELETE"]);
+    mock.with_tokens(|t| {
+        assert_eq!(t.issued.len(), 1);
+        assert_eq!(t.deleted, t.issued, "the rejected token was deleted");
+        assert!(t.live_tokens().is_empty());
+    });
+    assert_eq!(ws.handshakes(Api::Private), 0);
+    feed.close().await.unwrap();
+    assert_eq!(
+        ws_auth_methods(&mock),
+        ["POST", "DELETE"],
+        "close has nothing left to delete"
+    );
+}
+
+/// 再利用したトークンが拒まれたら 1 度だけ取り直す。取り直したトークンも
+/// 拒まれたら、新しいトークンの規則で終わる。発行は 2 回で止まる。
+#[tokio::test]
+async fn a_reused_token_rejected_at_the_handshake_is_replaced_once_then_the_feed_ends() {
+    let mock = MockExchange::start().await;
+    let ws = mock.ws();
+    let client = fast_client(&mock, |_| {}).authenticate(MockExchange::credentials());
+    let mut feed = client.private_feed();
+    feed.subscribe(PrivateChannel::OrderEvents).unwrap();
+
+    let driver = tokio::spawn(async move {
+        let _ = tokio::time::timeout(Duration::from_millis(300), feed.next()).await;
+        feed
+    });
+    ws.subscribed(Api::Private, "orderEvents", None, WAIT).await;
+    let mut feed = driver.await.unwrap();
+
+    ws.reject_private_handshakes(Some(401));
+    ws.drop_connections(Api::Private);
+    assert!(matches!(
+        feed.next().await,
+        Ok(PrivateEvent::Disconnected(_))
+    ));
+    match feed.next().await.unwrap() {
+        PrivateEvent::Disconnected(d) => assert!(
+            matches!(
+                d.reason,
+                DisconnectReason::HandshakeRejected { http_status: 401 }
+            ),
+            "{:?}",
+            d.reason
+        ),
+        other => panic!("{other:?}"),
+    }
+    match feed.next().await {
+        Err(Error::Protocol(p)) => assert_eq!(
+            *p.kind(),
+            ProtocolErrorKind::WsHandshake { http_status: 401 },
+            "{p:?}"
+        ),
+        other => panic!("{other:?}"),
+    }
+    assert!(matches!(feed.next().await, Err(Error::FeedClosed)));
+
+    let issued = mock.with_tokens(|t| t.issued.clone());
+    assert_eq!(issued.len(), 2, "re-acquired exactly once");
+    assert_eq!(
+        mock.with_tokens(|t| t.deleted.clone()),
+        vec![issued[1].clone()],
+        "the fresh token was deleted; the dead one is the exchange's to expire"
+    );
+    assert_eq!(ws_auth_methods(&mock), ["POST", "POST", "DELETE"]);
+}
+
+/// `close` が接続試行の途中で呼ばれても、その試行で発行したトークンは
+/// 削除される。
+#[tokio::test]
+async fn close_during_a_dial_deletes_the_token_issued_by_that_dial() {
+    let mock = MockExchange::start().await;
+    let client = fast_client(&mock, |_| {}).authenticate(MockExchange::credentials());
+    let mut feed = client.private_feed();
+    feed.subscribe(PrivateChannel::OrderEvents).unwrap();
+
+    let _ = tokio::time::timeout(Duration::from_millis(5), feed.next()).await;
+    feed.close().await.unwrap();
+
+    mock.with_tokens(|t| {
+        assert_eq!(t.issued.len(), 1, "the dial had issued a token");
+        assert_eq!(t.deleted, t.issued);
+        assert!(t.live_tokens().is_empty());
+    });
 }
 
 /// 書き込みの期限は、flush が終わった後の沈黙には適用されない。コマンドを
