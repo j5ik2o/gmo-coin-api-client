@@ -33,7 +33,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 use super::codec::{Codec, Decoded};
 use super::lease::{Auth, LeaseSchedule, TokenLease, TokenSource};
-use super::{Disconnect, DisconnectReason, FeedChannel, PrivateChannel, PublicChannel};
+use super::{Disconnect, DisconnectReason, FeedChannel, Pacer, PrivateChannel, PublicChannel};
 use crate::client::{Authenticated, Client, Inner, Limits};
 use crate::error::{
     ApiGroup, ContractViolation, Delivery, Error, ErrorCode, Phase, ProtocolError,
@@ -43,6 +43,13 @@ use crate::transport::ws::{self, WsConnectError, WsStream};
 
 /// エラーに載せる操作名。ハンドシェイクのパス。トークンは決して含まない。
 pub(super) const OPERATION: &str = "/v1";
+
+/// 書き込みからこの時間を過ぎて届いた拒否は、どのコマンドのものともしない。
+/// 取引所は不正なコマンドにすぐ答え、コマンドはこの間隔でしか送らないので、
+/// これより古いコマンドへの返答はもう来ない。静かなチャネル (たとえば
+/// `orderEvents`) の subscribe はデータで裏付けられるまで長く待つので、
+/// 時間で区切らないと、後のサーバ発の拒否がその購読を落とす。
+pub(crate) const REJECTION_WINDOW: Duration = Pacer::INTERVAL;
 
 /// 1 回の接続試行。`State::Dialing` に保存され、キャンセルの後も続きから
 /// 進む。
@@ -93,11 +100,11 @@ enum State<C: FeedChannel> {
 /// 再接続で望ましい集合を再生する仕組みである。
 struct Sent<C: FeedChannel> {
     subscribed: BTreeMap<<C as Codec>::Key, C>,
-    /// 最後に書いたコマンドのうち、まだ返答で裏付けられていないもの。
-    /// サーバの拒否はこれに帰属する。新しいキーの subscribe はそのキーの
-    /// 最初のデータイベントで裏付けられる。拒否は 1 つのコマンドにしか
-    /// 帰属しない。
-    last: Option<Written<C>>,
+    /// 最後に書いたコマンドと書いた時刻のうち、まだ返答で裏付けられていない
+    /// もの。書き込みから `REJECTION_WINDOW` 以内に届いたサーバの拒否は
+    /// これに帰属する。新しいキーの subscribe はそのキーの最初のデータ
+    /// イベントで裏付けられる。拒否は 1 つのコマンドにしか帰属しない。
+    last: Option<(Instant, Written<C>)>,
 }
 
 impl<C: FeedChannel> Sent<C> {
@@ -112,22 +119,34 @@ impl<C: FeedChannel> Sent<C> {
     /// 通ったと分かる。置き換えは分からない: 古い購読のデータが同じキーで
     /// 流れ続けるからである。
     fn confirmed(&mut self, key: &<C as Codec>::Key) {
-        if let Some(Written::Subscribe {
-            channel,
-            replaced: false,
-        }) = &self.last
+        if let Some((
+            _,
+            Written::Subscribe {
+                channel,
+                replaced: false,
+            },
+        )) = &self.last
             && channel.key() == *key
         {
             self.last = None;
         }
     }
 
-    /// 拒否を最後のコマンドに帰属させ、拒否された subscribe を取り消す。
-    /// `desired` からは、そのキーがまだ同じチャネルを望んでいるときだけ
-    /// 外す。別のオプションで望み直した subscribe はまだ送っていない
-    /// 別のコマンドだからである。
-    fn rejected(&mut self, desired: &mut BTreeMap<<C as Codec>::Key, C>) -> Option<C> {
-        match self.last.take()? {
+    /// `now` に届いた拒否を、`REJECTION_WINDOW` 以内に書いた最後のコマンドに
+    /// 帰属させ、拒否された subscribe を取り消す。`desired` からは、そのキーが
+    /// まだ同じチャネルを望んでいるときだけ外す。別のオプションで望み直した
+    /// subscribe はまだ送っていない別のコマンドだからである。窓を過ぎて
+    /// いれば `None` を返し、何も変えない。
+    fn rejected(
+        &mut self,
+        desired: &mut BTreeMap<<C as Codec>::Key, C>,
+        now: Instant,
+    ) -> Option<C> {
+        let (written_at, command) = self.last.take()?;
+        if now > written_at + REJECTION_WINDOW {
+            return None;
+        }
+        match command {
             Written::Subscribe { channel, .. } => {
                 let key = channel.key();
                 self.subscribed.remove(&key);
@@ -490,7 +509,7 @@ impl<C: FeedChannel> Session<C> {
                     None => Some(Ok(event)),
                 },
                 Ok(Decoded::Rejected(text)) => {
-                    let channel = sent.rejected(desired);
+                    let channel = sent.rejected(desired, Instant::now());
                     Some(Ok(C::rejected(channel, text)))
                 }
                 Err(kind) => {
@@ -521,13 +540,14 @@ impl<C: FeedChannel> Session<C> {
                     return Some(Ok(self.drop_connection(live_failure(C::API, kind))));
                 }
                 let key = channel.key();
-                sent.last = Some(if subscribe {
+                let written = if subscribe {
                     let replaced = sent.subscribed.insert(key, channel.clone()).is_some();
                     Written::Subscribe { channel, replaced }
                 } else {
                     sent.subscribed.remove(&key);
                     Written::Unsubscribe(channel)
-                });
+                };
+                sent.last = Some((Instant::now(), written));
                 conn.flush_since.get_or_insert_with(Instant::now);
                 None
             }

@@ -934,6 +934,61 @@ async fn a_rejected_subscribe_is_dropped_until_the_caller_subscribes_again() {
     feed.close().await.unwrap();
 }
 
+/// 静かな Private チャネル (`orderEvents`) を subscribe し、モックに届いてから
+/// `delay` 置いて、サーバが自発的に送った形の拒否を push する。返るのは
+/// `Rejected` の `channel` と、その後に push した orderEvents が届いたか
+/// (購読が集合に残っていれば届く)。
+async fn unsolicited_rejection_after(delay: Duration) -> (Option<PrivateChannel>, bool) {
+    let mock = MockExchange::start().await;
+    let ws = mock.ws();
+    let client = fast_client(&mock, |_| {}).authenticate(MockExchange::credentials());
+    let mut feed = client.private_feed();
+    feed.subscribe(PrivateChannel::OrderEvents).unwrap();
+
+    let driver = tokio::spawn(async move {
+        let event = feed.next().await;
+        (feed, event)
+    });
+    ws.subscribed(Api::Private, "orderEvents", None, WAIT).await;
+    tokio::time::sleep(delay).await;
+    ws.push(Api::Private, &fixture("live/ws_public_error.json"));
+    let (mut feed, event) = driver.await.unwrap();
+    let channel = match event.unwrap() {
+        PrivateEvent::Rejected { channel, text } => {
+            assert_eq!(&*text, "ERR-5106 Invalid request parameter. channel");
+            channel
+        }
+        other => panic!("{other:?}"),
+    };
+
+    ws.push(Api::Private, &fixture("ws_private_orderEvents.json"));
+    let delivered = match tokio::time::timeout(Duration::from_millis(500), feed.next()).await {
+        Ok(Ok(PrivateEvent::Order(_))) => true,
+        Ok(other) => panic!("{other:?}"),
+        Err(_elapsed) => false,
+    };
+    feed.close().await.unwrap();
+    (channel, delivered)
+}
+
+/// 取引所は不正なコマンドにすぐ答えるので、書き込みの直後に届いた拒否は
+/// その subscribe のものとみなし、購読は集合から外れる。
+#[tokio::test]
+async fn a_rejection_right_after_a_quiet_subscribe_is_attributed_to_it() {
+    let (channel, delivered) = unsolicited_rejection_after(Duration::ZERO).await;
+    assert_eq!(channel, Some(PrivateChannel::OrderEvents));
+    assert!(!delivered, "the rejected subscribe left the desired set");
+}
+
+/// コマンドの間隔 (1.05 秒) を過ぎて届いた拒否は、どのコマンドのものとも
+/// しない。`channel` は `None` で、静かなチャネルの購読は生き続ける。
+#[tokio::test]
+async fn a_rejection_after_the_window_names_no_channel_and_drops_nothing() {
+    let (channel, delivered) = unsolicited_rejection_after(Duration::from_millis(1300)).await;
+    assert_eq!(channel, None);
+    assert!(delivered, "the subscription stayed in the desired set");
+}
+
 /// 同じキーを置き換える subscribe は、古い購読のデータでは裏付けられない。
 /// 置き換えが拒否されたら、間に古いデータが流れていても拒否は置き換えに
 /// 帰属し、置き換えは集合から外れる。
