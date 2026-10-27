@@ -229,7 +229,10 @@ async fn exchange(
     }
     let status = response.status().as_u16();
     let mut body = response.into_body();
-    let mut buf = Zeroizing::new(Vec::new());
+    // `Content-Length` の分を先に確保する。伸長のたびに古いバッファが
+    // ゼロ埋めされないまま残るのを避けるため (chunked では残る)。
+    let reserve = declared.map_or(0, |n| usize::try_from(n).unwrap_or(usize::MAX));
+    let mut buf = Zeroizing::new(Vec::with_capacity(reserve));
     while let Some(frame) = body.frame().await {
         let frame = frame.map_err(|e| Attempt::Failed(hyper_kind(&e)))?;
         if let Ok(data) = frame.into_data() {
