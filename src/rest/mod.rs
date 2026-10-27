@@ -239,7 +239,6 @@ impl<A: Access> Client<A> {
         let route = Route {
             api,
             operation: call.endpoint.operation,
-            method: call.endpoint.method,
             base,
             pool,
         };
