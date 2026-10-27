@@ -586,23 +586,49 @@ fn rejects_token(http_status: u16) -> bool {
     matches!(http_status, 401 | 403 | 404)
 }
 
-/// `POST ws-auth` の失敗。メンテナンス (ERR-5201/5202/5203、または
-/// エンベロープのない 503) とネットワークは再試行、それ以外は終端。
+/// `POST ws-auth` の失敗。再試行するのは、メンテナンス (ERR-5201/5202/5203、
+/// またはエンベロープのない 503)、一時的なコード (ERR-554、626、5003、5008、
+/// 5009)、エンベロープのない 5xx、ネットワーク。それ以外 (キーの拒否
+/// ERR-5011/5012、形の違反、契約違反) は終端。
 fn acquire_failure(e: Error) -> DialFailure {
     const MAINTENANCE: [ErrorCode; 3] = [
         ErrorCode::SCHEDULED_MAINTENANCE,
         ErrorCode::EMERGENCY_MAINTENANCE,
         ErrorCode::PRE_OPEN,
     ];
+    const TRANSIENT: [ErrorCode; 5] = [
+        ErrorCode::SERVER_UNAVAILABLE,
+        ErrorCode::SERVER_BUSY,
+        ErrorCode::RATE_LIMIT,
+        ErrorCode::TIMESTAMP_TOO_LATE,
+        ErrorCode::TIMESTAMP_TOO_EARLY,
+    ];
+    let has_any =
+        |api: &crate::error::ApiError, codes: &[ErrorCode]| codes.iter().any(|code| api.has(*code));
     match e {
-        Error::Api(api) if MAINTENANCE.iter().any(|code| api.has(*code)) => {
+        Error::Api(api) if has_any(&api, &MAINTENANCE) => {
             DialFailure::Retry(DisconnectReason::Maintenance)
+        }
+        Error::Api(api) if has_any(&api, &TRANSIENT) => {
+            DialFailure::Retry(DisconnectReason::Api(api))
         }
         Error::Protocol(p) if *p.kind() == ProtocolErrorKind::HttpStatus(503) => {
             DialFailure::Retry(DisconnectReason::Maintenance)
         }
+        Error::Protocol(p) if matches!(p.kind(), ProtocolErrorKind::HttpStatus(500..=599)) => {
+            DialFailure::Retry(DisconnectReason::Protocol(p))
+        }
         Error::Transport(t) => DialFailure::Retry(DisconnectReason::Transport(t)),
         other => DialFailure::Terminal(other),
+    }
+}
+
+/// 理由ごとの、バックオフの梯子を先に進める段数。呼び出し上限 (ERR-5003)
+/// は 2 段 (4 倍): 1 秒の窓を確実に越え、上限を叩き続けない。
+fn extra_backoff_steps(reason: &DisconnectReason) -> u32 {
+    match reason {
+        DisconnectReason::Api(api) if api.has(ErrorCode::RATE_LIMIT) => 2,
+        _ => 0,
     }
 }
 
@@ -688,7 +714,8 @@ impl<C: FeedChannel> Session<C> {
 
     /// `Waiting` に移り、`Disconnected` を作る。進行中の延長は捨てる。
     fn disconnected(&mut self, reason: DisconnectReason) -> <C as Codec>::Event {
-        let delay = self.inner.config.reconnect.delay(self.attempt);
+        let step = self.attempt.saturating_add(extra_backoff_steps(&reason));
+        let delay = self.inner.config.reconnect.delay(step);
         self.attempt = self.attempt.saturating_add(1);
         self.state = State::Waiting {
             until: Instant::now() + delay,

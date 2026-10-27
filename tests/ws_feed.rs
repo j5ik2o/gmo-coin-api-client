@@ -9,12 +9,12 @@ mod support;
 
 use std::time::{Duration, Instant};
 
-use gmo_coin_api_client::error::{Phase, ProtocolErrorKind, TransportErrorKind};
+use gmo_coin_api_client::error::{ErrorCode, Phase, ProtocolErrorKind, TransportErrorKind};
 use gmo_coin_api_client::ws::{
     DisconnectReason, PrivateChannel, PrivateEvent, PublicChannel, PublicEvent,
 };
 use gmo_coin_api_client::{Anonymous, Backoff, Client, Config, Error, Symbol, Timeout};
-use support::{Api, MockExchange, fixture};
+use support::{Api, MockExchange, Reply, api_error, fixture};
 
 const WAIT: Duration = Duration::from_secs(5);
 
@@ -538,6 +538,88 @@ async fn a_reused_token_rejected_at_the_handshake_is_replaced_once_then_the_feed
         "the fresh token was deleted; the dead one is the exchange's to expire"
     );
     assert_eq!(ws_auth_methods(&mock), ["POST", "POST", "DELETE"]);
+}
+
+/// `POST ws-auth` の一時的な失敗は `Disconnected` になり、次の試行で
+/// 取り直す。ERR-5003 はバックオフの梯子を 2 段先 (4 倍) から始める。
+#[tokio::test]
+async fn transient_ws_auth_failures_are_retried_and_rate_limit_waits_longer() {
+    struct Case {
+        reply: Reply,
+        check: fn(&DisconnectReason) -> bool,
+        retry_in: Duration,
+    }
+    let cases = [
+        Case {
+            reply: Reply::Json(api_error("ERR-554", "Server unavailable.")),
+            check: |r| matches!(r, DisconnectReason::Api(e) if e.has(ErrorCode::SERVER_UNAVAILABLE)),
+            retry_in: Duration::from_millis(20),
+        },
+        Case {
+            reply: Reply::Json(api_error("ERR-5008", "Timestamp too late.")),
+            check: |r| matches!(r, DisconnectReason::Api(e) if e.has(ErrorCode::TIMESTAMP_TOO_LATE)),
+            retry_in: Duration::from_millis(20),
+        },
+        Case {
+            reply: Reply::Json(api_error("ERR-5003", "Requests are too many.")),
+            check: |r| matches!(r, DisconnectReason::Api(e) if e.has(ErrorCode::RATE_LIMIT)),
+            retry_in: Duration::from_millis(80),
+        },
+        Case {
+            reply: Reply::Status {
+                code: 502,
+                body: "<html>bad gateway</html>".to_owned(),
+            },
+            check: |r| matches!(r, DisconnectReason::Protocol(p) if *p.kind() == ProtocolErrorKind::HttpStatus(502)),
+            retry_in: Duration::from_millis(20),
+        },
+    ];
+    for case in cases {
+        let mock = MockExchange::start().await;
+        let ws = mock.ws();
+        mock.on("POST", "/private/v1/ws-auth")
+            .times(1)
+            .reply(case.reply.clone());
+        let client = fast_client(&mock, |_| {}).authenticate(MockExchange::credentials());
+        let mut feed = client.private_feed();
+        feed.subscribe(PrivateChannel::OrderEvents).unwrap();
+
+        match feed.next().await {
+            Ok(PrivateEvent::Disconnected(d)) => {
+                assert!((case.check)(&d.reason), "{:?}: {:?}", case.reply, d.reason);
+                assert_eq!(d.retry_in, case.retry_in, "{:?}", case.reply);
+            }
+            other => panic!("{:?}: {other:?}", case.reply),
+        }
+        assert!(
+            matches!(feed.next().await, Ok(PrivateEvent::Reconnected)),
+            "{:?}: the built-in route issued a token on the second try",
+            case.reply
+        );
+        assert_eq!(ws.handshakes(Api::Private), 1);
+        feed.close().await.unwrap();
+        mock.assert_done();
+    }
+}
+
+/// キーの拒否 (ERR-5012) は一時的ではない: フィードは終わり、取り直さない。
+#[tokio::test]
+async fn a_rejected_api_key_at_ws_auth_ends_the_feed() {
+    let mock = MockExchange::start().await;
+    mock.on("POST", "/private/v1/ws-auth")
+        .times(1)
+        .reply(Reply::Json(api_error("ERR-5012", "API key rejected.")));
+    let client = fast_client(&mock, |_| {}).authenticate(MockExchange::credentials());
+    let mut feed = client.private_feed();
+    feed.subscribe(PrivateChannel::OrderEvents).unwrap();
+
+    match feed.next().await {
+        Err(Error::Api(e)) => assert!(e.has(ErrorCode::API_KEY_REJECTED), "{e:?}"),
+        other => panic!("{other:?}"),
+    }
+    assert!(matches!(feed.next().await, Err(Error::FeedClosed)));
+    assert_eq!(ws_auth_methods(&mock), ["POST"]);
+    mock.assert_done();
 }
 
 /// `close` が接続試行の途中で呼ばれても、その試行で発行したトークンは

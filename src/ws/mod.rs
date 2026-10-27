@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 use crate::client::{Access, Authenticated, Client};
 use crate::domain::{InvalidValue, Primitive, Symbol, Violation};
 use crate::endpoint::Transport;
-use crate::error::{ContractViolation, Result, TransportError};
+use crate::error::{ApiError, ContractViolation, ProtocolError, Result, TransportError};
 use crate::rest::Ticker;
 
 /// Public または Private WebSocket API のチャネル: [`PublicChannel`] か
@@ -133,6 +133,14 @@ pub struct Disconnect {
 pub enum DisconnectReason {
     /// ネットワーク、TLS、フレーミング、またはタイムアウト (`ws_idle` を含む)。
     Transport(TransportError),
+    /// `POST ws-auth` が一時的なコードで拒まれた: ERR-554、ERR-626、
+    /// ERR-5003、ERR-5008、ERR-5009。ERR-5003 (呼び出し上限) はバックオフの
+    /// 梯子を 2 段先 (4 倍の待ち) から始める。ERR-5008/5009 は時計のずれ
+    /// なので、繰り返すなら時刻同期を疑うこと。
+    Api(ApiError),
+    /// `POST ws-auth` がエンベロープのない 5xx で答えた (ゲートウェイの
+    /// 502/504 など)。
+    Protocol(ProtocolError),
     /// サーバが close フレームを送った。
     ServerClosed { code: Option<u16> },
     /// ハンドシェイクで HTTP 503: 文書化されたメンテナンスの答え。
@@ -233,7 +241,9 @@ impl<C: FeedChannel> Feed<C> {
     /// # エラー
     /// 終端的である。以後フィードは閉じており、さらに呼ぶと `FeedClosed` を返す:
     /// - `ws-auth` からの `Api` (たとえば ERR-5012、拒否されたキー)。
-    ///   メンテナンス (ERR-5201、5202、5203) は例外で、`Disconnected` になる。
+    ///   メンテナンス (ERR-5201、5202、5203) と一時的なコード (ERR-554、626、
+    ///   5003、5008、5009) は例外で、`Disconnected` になる
+    ///   ([`DisconnectReason::Api`])。
     /// - 購読中のチャネルのメッセージがデコードできないときの
     ///   `Protocol(WsMessage)`。フェイルクローズド: モデルがもはや取引所と
     ///   一致していない。
@@ -242,6 +252,8 @@ impl<C: FeedChannel> Feed<C> {
     ///   取引所が発行直後のトークンを拒むのは設定の問題 (API キーの権限など)
     ///   であり、発行を繰り返すと同じキーの別プロセスのトークンを追い出す。
     /// - `ws-auth` の答えが形を破ったときの、それ以外の `Protocol` と `Contract`。
+    ///   エンベロープのない 5xx は例外で、`Disconnected` になる
+    ///   ([`DisconnectReason::Protocol`])。
     ///
     /// ネットワークの失敗はここではエラーではない。`Disconnected` イベントに
     /// なり、`Config::reconnect` のバックオフで再接続する。
