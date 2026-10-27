@@ -423,3 +423,26 @@ async fn a_private_token_rejected_at_reconnect_is_reacquired() {
         "close deleted the second token"
     );
 }
+
+/// 書き込みの期限は、flush が終わった後の沈黙には適用されない。コマンドを
+/// 1 つ流したあと `ws_write` より長く何も届かなくても、接続は保たれる。
+#[tokio::test]
+async fn a_flushed_command_followed_by_silence_does_not_trip_the_write_deadline() {
+    let mock = MockExchange::start().await;
+    let ws = mock.ws();
+    let mut feed = fast_client(&mock, |c| {
+        c.timeouts.ws_write = Timeout::new(Duration::from_millis(100)).unwrap();
+    })
+    .public_feed();
+    feed.subscribe(PublicChannel::Ticker(Symbol::BTC)).unwrap();
+
+    let quiet = tokio::time::timeout(Duration::from_millis(500), feed.next()).await;
+    assert!(
+        quiet.is_err(),
+        "nothing should be yielded while the server is silent, got {quiet:?}"
+    );
+    ws.subscribed(Api::Public, "ticker", Some("BTC"), WAIT)
+        .await;
+    assert_eq!(ws.handshakes(Api::Public), 1, "the connection was kept");
+    feed.close().await.unwrap();
+}
