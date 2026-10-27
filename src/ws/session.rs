@@ -468,7 +468,8 @@ struct Written<C> {
 pub(crate) struct Connection {
     /// tokio-tungstenite の接続。フレーミング、ping への pong、サイズ上限は
     /// すべてこの中にある。書き込みは `poll_ready`、`start_send`、`poll_flush`
-    /// で行い、`SinkExt::send` を `select!` の中に置かない (SYNTHESIS を参照)。
+    /// で行う。`SinkExt::send` はキャンセル安全でなく、`select!` の中で
+    /// 打ち切られると書きかけのフレームを失うからである。
     stream: WsStream,
     connected_at: Instant,
     last_frame_at: Instant,
