@@ -53,7 +53,10 @@ impl Symbol {
     /// the build, not a runtime check.
     const fn from_static(text: &str) -> Symbol {
         let src = text.as_bytes();
-        assert!(!src.is_empty() && src.len() <= Self::MAX_LEN, "symbol length");
+        assert!(
+            !src.is_empty() && src.len() <= Self::MAX_LEN,
+            "symbol length"
+        );
         let mut bytes = [0u8; Self::MAX_LEN];
         let mut i = 0;
         while i < src.len() {
@@ -62,7 +65,10 @@ impl Symbol {
             bytes[i] = b;
             i += 1;
         }
-        Symbol { len: src.len() as u8, bytes }
+        Symbol {
+            len: src.len() as u8,
+            bytes,
+        }
     }
 
     const fn allowed(b: u8) -> bool {
@@ -82,11 +88,17 @@ impl Symbol {
         check_size_and_lexical(Primitive::Symbol, text, 1, Self::MAX_LEN, Self::allowed)?;
         let mut bytes = [0u8; Self::MAX_LEN];
         bytes[..text.len()].copy_from_slice(text.as_bytes());
-        Ok(Symbol { len: text.len() as u8, bytes })
+        Ok(Symbol {
+            len: text.len() as u8,
+            bytes,
+        })
     }
 
     pub fn as_str(&self) -> &str {
-        debug_assert!(self.bytes[..self.len as usize].is_ascii(), "Symbol::parse admits ASCII only");
+        debug_assert!(
+            self.bytes[..self.len as usize].is_ascii(),
+            "Symbol::parse admits ASCII only"
+        );
         core::str::from_utf8(&self.bytes[..self.len as usize]).unwrap_or_default()
     }
 
@@ -94,7 +106,11 @@ impl Symbol {
     /// the symbol. Used by the order preconditions (`losscutPrice` needs a
     /// leverage symbol; `cancelBefore` on `/order` needs a spot symbol).
     pub fn market(&self) -> Market {
-        if self.as_str().contains(['_', '/']) { Market::Leverage } else { Market::Spot }
+        if self.as_str().contains(['_', '/']) {
+            Market::Leverage
+        } else {
+            Market::Spot
+        }
     }
 }
 

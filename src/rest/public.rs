@@ -123,7 +123,9 @@ impl<A: Access> Client<A> {
     /// # Errors
     /// The [REST set](crate::rest#errors).
     pub async fn tickers(&self) -> Result<Vec<Ticker>> {
-        self.public(Call::new(endpoint!(GET "/v1/ticker"))).await?.data()
+        self.public(Call::new(endpoint!(GET "/v1/ticker")))
+            .await?
+            .data()
     }
 
     /// `GET /public/v1/orderbooks?symbol=`.
@@ -192,6 +194,8 @@ impl<A: Access> Client<A> {
     /// # Errors
     /// The [REST set](crate::rest#errors).
     pub async fn symbols(&self) -> Result<Vec<SymbolRule>> {
-        self.public(Call::new(endpoint!(GET "/v1/symbols"))).await?.data()
+        self.public(Call::new(endpoint!(GET "/v1/symbols")))
+            .await?
+            .data()
     }
 }

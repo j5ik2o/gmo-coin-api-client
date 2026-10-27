@@ -225,7 +225,10 @@ impl HistoryWindow {
     /// # Errors
     /// `Semantics("to is not after from")`, `Semantics("span over 30 minutes")`.
     pub fn between(from: Timestamp, to: Timestamp) -> Result<Self, InvalidValue> {
-        let invalid = |why| InvalidValue { primitive: Primitive::HistoryWindow, violation: Violation::Semantics(why) };
+        let invalid = |why| InvalidValue {
+            primitive: Primitive::HistoryWindow,
+            violation: Violation::Semantics(why),
+        };
         match to.duration_since(from) {
             None | Some(Duration::ZERO) => Err(invalid("to is not after from")),
             Some(span) if span > Self::MAX_SPAN => Err(invalid("span over 30 minutes")),
@@ -268,7 +271,10 @@ impl BusinessDateRange {
     /// # Errors
     /// Infallible.
     pub fn single(day: BusinessDate) -> Self {
-        Self { from: day, to: None }
+        Self {
+            from: day,
+            to: None,
+        }
     }
 
     /// A range with both ends.
@@ -281,7 +287,10 @@ impl BusinessDateRange {
     /// # Errors
     /// `Semantics("to before from")`, `Semantics("span over 7 days")`.
     pub fn between(from: BusinessDate, to: BusinessDate) -> Result<Self, InvalidValue> {
-        let invalid = |why| InvalidValue { primitive: Primitive::BusinessDateRange, violation: Violation::Semantics(why) };
+        let invalid = |why| InvalidValue {
+            primitive: Primitive::BusinessDateRange,
+            violation: Violation::Semantics(why),
+        };
         match to.days_since(from) {
             d if d < 0 => Err(invalid("to before from")),
             d if d > Self::MAX_DAYS => Err(invalid("span over 7 days")),
@@ -305,7 +314,10 @@ impl BusinessDateRange {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KlineSpan {
     /// `1min 5min 10min 15min 30min 1hour` for one business day.
-    Day { interval: IntradayInterval, date: BusinessDate },
+    Day {
+        interval: IntradayInterval,
+        date: BusinessDate,
+    },
     /// `4hour 8hour 12hour 1day 1week 1month` for one year.
     Year { interval: LongInterval, year: u16 },
 }

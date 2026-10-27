@@ -78,7 +78,9 @@ impl ApiSecret {
     /// `Size` or `Lexical`. The error never contains the input.
     pub fn new(secret: String) -> Result<Self, InvalidValue> {
         let secret = Zeroizing::new(secret);
-        check_size_and_lexical(Primitive::ApiSecret, &secret, 1, 256, |b| b.is_ascii_graphic())?;
+        check_size_and_lexical(Primitive::ApiSecret, &secret, 1, 256, |b| {
+            b.is_ascii_graphic()
+        })?;
         Ok(Self(secret))
     }
 
@@ -159,7 +161,11 @@ impl Credentials {
             path.as_str().as_bytes(),
             body,
         ]);
-        AuthHeaders { key: &self.key, timestamp, sign }
+        AuthHeaders {
+            key: &self.key,
+            timestamp,
+            sign,
+        }
     }
 }
 

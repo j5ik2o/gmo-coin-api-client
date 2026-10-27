@@ -52,14 +52,17 @@ mod secret;
 mod wire;
 pub mod ws;
 
-pub use client::{Access, Anonymous, Authenticated, Backoff, ByteLimit, Client, Config, Limits, Timeout, Timeouts};
+pub use client::{
+    Access, Anonymous, Authenticated, Backoff, ByteLimit, Client, Config, Limits, Timeout, Timeouts,
+};
 pub use domain::{
-    Amount, Batch, BusinessDate, BusinessDateRange, CancelType, ClientOrderId, CryptoShortfallStatus,
-    Decimal, ExchangeStatus, ExecutionId, ExecutionMsgType, ExecutionType, FeeType, HistoryWindow,
-    IntradayInterval, InvalidValue, KlineSpan, LimitTimeInForce, LongInterval, MarginCallStatus,
-    Market, OrderId, OrderMsgType, OrderStatus, OrderType, PositionId, PositionMsgType, Price,
-    Primitive, SettleFilter, SettleType, Side, Size, SummaryMsgType, Symbol, TimeInForce,
-    Timestamp, TransferStatus, TransferType, UnknownValue, Violation,
+    Amount, Batch, BusinessDate, BusinessDateRange, CancelType, ClientOrderId,
+    CryptoShortfallStatus, Decimal, ExchangeStatus, ExecutionId, ExecutionMsgType, ExecutionType,
+    FeeType, HistoryWindow, IntradayInterval, InvalidValue, KlineSpan, LimitTimeInForce,
+    LongInterval, MarginCallStatus, Market, OrderId, OrderMsgType, OrderStatus, OrderType,
+    PositionId, PositionMsgType, Price, Primitive, SettleFilter, SettleType, Side, Size,
+    SummaryMsgType, Symbol, TimeInForce, Timestamp, TransferStatus, TransferType, UnknownValue,
+    Violation,
 };
 pub use endpoint::{Endpoints, RestBase, WsBase};
 pub use error::{Error, Result};

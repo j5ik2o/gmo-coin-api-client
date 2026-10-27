@@ -27,7 +27,9 @@ pub(crate) enum Incoming {
     Binary(Vec<u8>),
     Ping(Vec<u8>),
     Pong(Vec<u8>),
-    Close { code: Option<u16> },
+    Close {
+        code: Option<u16>,
+    },
 }
 
 /// Incremental frame decoder.
@@ -47,7 +49,10 @@ pub(crate) enum Opcode {
 
 impl FrameDecoder {
     pub(crate) fn new(max_message: u32) -> Self {
-        Self { max_message, partial: None }
+        Self {
+            max_message,
+            partial: None,
+        }
     }
 
     /// Decodes at most one `Incoming` from the front of `buf`, draining the
@@ -56,7 +61,10 @@ impl FrameDecoder {
     /// # Errors
     /// `TooLarge` (declared length over the limit) or `Framing(..)` for any
     /// rule in the module docs.
-    pub(crate) fn decode(&mut self, buf: &mut Vec<u8>) -> Result<Option<Incoming>, TransportErrorKind> {
+    pub(crate) fn decode(
+        &mut self,
+        buf: &mut Vec<u8>,
+    ) -> Result<Option<Incoming>, TransportErrorKind> {
         // TODO header: b0 = FIN|RSV|opcode, b1 = MASK|len7; len7 126 => u16, 127 => u64 (MSB 0).
         // MASK set => Framing("masked server frame"). RSV != 0 => Framing("rsv").
         // control opcode && (!FIN || len > 125) => Framing("control frame").
@@ -112,7 +120,10 @@ pub(crate) fn expected_accept(key_b64: &str) -> String {
 /// `Framing` unless the status is 101, `Upgrade: websocket`,
 /// `Connection: Upgrade`, and `Sec-WebSocket-Accept` equals `expected`.
 /// A 503 is reported separately so the session can treat it as maintenance.
-pub(crate) fn check_handshake(head: &[u8], expected: &str) -> Result<HandshakeOutcome, TransportErrorKind> {
+pub(crate) fn check_handshake(
+    head: &[u8],
+    expected: &str,
+) -> Result<HandshakeOutcome, TransportErrorKind> {
     let _ = (head, expected);
     todo!()
 }

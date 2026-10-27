@@ -90,10 +90,25 @@ pub(crate) struct ResponseDecoder {
 }
 
 enum DecodeState {
-    Head { buf: Vec<u8> },
-    Fixed { status: u16, reusable: bool, remaining: usize, body: Vec<u8> },
-    Chunked { status: u16, reusable: bool, body: Vec<u8>, chunk: ChunkState },
-    UntilClose { status: u16, body: Vec<u8> },
+    Head {
+        buf: Vec<u8>,
+    },
+    Fixed {
+        status: u16,
+        reusable: bool,
+        remaining: usize,
+        body: Vec<u8>,
+    },
+    Chunked {
+        status: u16,
+        reusable: bool,
+        body: Vec<u8>,
+        chunk: ChunkState,
+    },
+    UntilClose {
+        status: u16,
+        body: Vec<u8>,
+    },
 }
 
 enum ChunkState {
@@ -116,7 +131,10 @@ impl ResponseDecoder {
     pub(crate) const MAX_HEADERS: usize = 64;
 
     pub(crate) fn new(limits: &Limits) -> Self {
-        Self { max_body: limits.max_response_bytes.get(), state: DecodeState::Head { buf: Vec::new() } }
+        Self {
+            max_body: limits.max_response_bytes.get(),
+            state: DecodeState::Head { buf: Vec::new() },
+        }
     }
 
     /// Feeds bytes read from the socket.
@@ -140,7 +158,12 @@ impl ResponseDecoder {
         // then re-feed bytes[n..] into the body state.
         // TODO EOF handling lives in finish(): UntilClose => Done; other states => ClosedEarly.
         let _ = (bytes, &self.max_body, &self.state);
-        let _ = (ChunkState::SizeLine, ChunkState::Data { remaining: 0 }, ChunkState::DataCrlf, ChunkState::Trailers);
+        let _ = (
+            ChunkState::SizeLine,
+            ChunkState::Data { remaining: 0 },
+            ChunkState::DataCrlf,
+            ChunkState::Trailers,
+        );
         todo!()
     }
 
@@ -172,7 +195,10 @@ impl Pool {
     pub(crate) const IDLE_TTL: std::time::Duration = std::time::Duration::from_secs(15);
 
     pub(crate) fn new(max_idle: u8) -> Self {
-        Self { idle: Mutex::new(Vec::new()), max_idle }
+        Self {
+            idle: Mutex::new(Vec::new()),
+            max_idle,
+        }
     }
 
     fn checkout(&self) -> Option<Stream> {
@@ -220,6 +246,13 @@ pub(crate) async fn round_trip(
     // on error before any response byte && was_reused && route.method.retry_on_stale_connection():
     //     retry once with a fresh connection and a fresh encode()
     // on Done { response, leftover: 0 } && response.reusable => route.pool.checkin(stream)
-    let _ = (connector, route, config, encode, Delivery::NotSent, Stream::read_some);
+    let _ = (
+        connector,
+        route,
+        config,
+        encode,
+        Delivery::NotSent,
+        Stream::read_some,
+    );
     todo!()
 }

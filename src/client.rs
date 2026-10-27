@@ -105,7 +105,10 @@ impl Client<Anonymous> {
     /// # Errors
     /// Infallible.
     pub fn authenticate(self, credentials: Credentials) -> Client<Authenticated> {
-        Client { inner: self.inner, access: Authenticated(Arc::new(credentials)) }
+        Client {
+            inner: self.inner,
+            access: Authenticated(Arc::new(credentials)),
+        }
     }
 }
 
@@ -157,7 +160,10 @@ impl Timeout {
     /// `Semantics("timeout out of range")`.
     pub fn new(d: Duration) -> Result<Self, InvalidValue> {
         if d < Duration::from_millis(1) || d > Self::MAX {
-            return Err(InvalidValue { primitive: Primitive::Config, violation: Violation::Semantics("timeout out of range") });
+            return Err(InvalidValue {
+                primitive: Primitive::Config,
+                violation: Violation::Semantics("timeout out of range"),
+            });
         }
         Ok(Self(d))
     }
@@ -202,7 +208,10 @@ impl ByteLimit {
     pub fn new(bytes: u32) -> Result<Self, InvalidValue> {
         match NonZeroU32::new(bytes) {
             Some(n) if bytes <= Self::MAX => Ok(Self(n)),
-            _ => Err(InvalidValue { primitive: Primitive::Config, violation: Violation::Semantics("byte limit out of range") }),
+            _ => Err(InvalidValue {
+                primitive: Primitive::Config,
+                violation: Violation::Semantics("byte limit out of range"),
+            }),
         }
     }
 
@@ -235,15 +244,24 @@ impl Backoff {
     /// `Semantics("initial > max")`.
     pub fn new(initial: Timeout, max: Timeout) -> Result<Self, InvalidValue> {
         if initial.get() > max.get() {
-            return Err(InvalidValue { primitive: Primitive::Config, violation: Violation::Semantics("initial > max") });
+            return Err(InvalidValue {
+                primitive: Primitive::Config,
+                violation: Violation::Semantics("initial > max"),
+            });
         }
         Ok(Self { initial, max })
     }
 
     /// Delay before attempt `attempt` (0-based).
     pub(crate) fn delay(&self, attempt: u32) -> Duration {
-        debug_assert!(self.initial.get() <= self.max.get(), "Backoff::new keeps initial <= max");
+        debug_assert!(
+            self.initial.get() <= self.max.get(),
+            "Backoff::new keeps initial <= max"
+        );
         let factor = 1u32.checked_shl(attempt.min(16)).unwrap_or(u32::MAX);
-        self.initial.get().saturating_mul(factor).min(self.max.get())
+        self.initial
+            .get()
+            .saturating_mul(factor)
+            .min(self.max.get())
     }
 }

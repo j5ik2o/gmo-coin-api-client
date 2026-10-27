@@ -131,7 +131,10 @@ enum Auth {
     Public,
     /// The token outlives connections: reconnects reuse it while it is live,
     /// so issuance (which can evict another process's token) stays rare.
-    Private { client: Client<Authenticated>, lease: Option<TokenLease> },
+    Private {
+        client: Client<Authenticated>,
+        lease: Option<TokenLease>,
+    },
 }
 
 /// # Invariants
@@ -263,13 +266,30 @@ impl<C: FeedChannel> Session<C> {
 
 impl Session<PublicChannel> {
     pub(crate) fn public(inner: Arc<Inner>) -> Self {
-        Self { inner, auth: Auth::Public, desired: BTreeMap::new(), state: State::Idle, attempt: 0, ever_connected: false }
+        Self {
+            inner,
+            auth: Auth::Public,
+            desired: BTreeMap::new(),
+            state: State::Idle,
+            attempt: 0,
+            ever_connected: false,
+        }
     }
 }
 
 impl Session<PrivateChannel> {
     pub(crate) fn private(client: Client<Authenticated>) -> Self {
         let inner = client.inner.clone();
-        Self { inner, auth: Auth::Private { client, lease: None }, desired: BTreeMap::new(), state: State::Idle, attempt: 0, ever_connected: false }
+        Self {
+            inner,
+            auth: Auth::Private {
+                client,
+                lease: None,
+            },
+            desired: BTreeMap::new(),
+            state: State::Idle,
+            attempt: 0,
+            ever_connected: false,
+        }
     }
 }

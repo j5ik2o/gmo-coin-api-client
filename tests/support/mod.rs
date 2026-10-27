@@ -27,9 +27,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use gmo_coin_api_client::{
-    ApiKey, ApiSecret, Anonymous, Client, Config, Credentials, Endpoints,
-};
+use gmo_coin_api_client::{Anonymous, ApiKey, ApiSecret, Client, Config, Credentials, Endpoints};
 
 pub use ws::{Api, WsControl};
 
@@ -135,7 +133,16 @@ impl MockExchange {
     pub fn on(&self, method: &'static str, path: &'static str) -> RouteBuilder<'_> {
         RouteBuilder {
             mock: self,
-            route: Route { method, path, query: None, json_body: None, signed: false, reply: Reply::Json(String::new()), times: None, hits: 0 },
+            route: Route {
+                method,
+                path,
+                query: None,
+                json_body: None,
+                signed: false,
+                reply: Reply::Json(String::new()),
+                times: None,
+                hits: 0,
+            },
         }
     }
 
@@ -193,7 +200,12 @@ impl RouteBuilder<'_> {
 
     pub fn reply(mut self, reply: Reply) {
         self.route.reply = reply;
-        self.mock.state.lock().expect("mock state").routes.push(self.route);
+        self.mock
+            .state
+            .lock()
+            .expect("mock state")
+            .routes
+            .push(self.route);
     }
 
     pub fn fixture(self, name: &'static str) {
@@ -209,5 +221,7 @@ pub fn fixture(name: &str) -> String {
 
 /// The exchange's own error shape, for `Reply::Json`.
 pub fn api_error(code: &str, text: &str) -> String {
-    format!(r#"{{"status":1,"messages":[{{"message_code":"{code}","message_string":"{text}"}}],"responsetime":"2026-10-27T11:49:18.425Z"}}"#)
+    format!(
+        r#"{{"status":1,"messages":[{{"message_code":"{code}","message_string":"{text}"}}],"responsetime":"2026-10-27T11:49:18.425Z"}}"#
+    )
 }

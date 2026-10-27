@@ -41,7 +41,9 @@ pub use order::{
     NewOrder, OrderExecution, OrderLookup,
 };
 pub use public::{Kline, OrderBook, OrderBookLevel, SymbolRule, Ticker, Trade};
-pub use trading::{CancelOrdersOutcome, CancelRejection, Execution, Order, Position, PositionSummary};
+pub use trading::{
+    CancelOrdersOutcome, CancelRejection, Execution, Order, Position, PositionSummary,
+};
 
 use core::num::NonZeroU32;
 
@@ -93,7 +95,11 @@ pub(crate) struct Call {
 
 impl Call {
     pub(crate) fn new(endpoint: Endpoint) -> Self {
-        Self { endpoint, query: Vec::new(), body: Zeroizing::new(Vec::new()) }
+        Self {
+            endpoint,
+            query: Vec::new(),
+            body: Zeroizing::new(Vec::new()),
+        }
     }
 
     /// Query values come from domain primitives whose lexical rules exclude
@@ -111,9 +117,13 @@ impl Call {
     /// primitives cannot (no non-string map keys, no floats). Panicking sends
     /// nothing; substituting an empty body would sign and send the wrong request.
     pub(crate) fn json<B: Serialize>(mut self, body: &B) -> Self {
-        let bytes = serde_json::to_vec(body).expect("request bodies are built from domain primitives");
+        let bytes =
+            serde_json::to_vec(body).expect("request bodies are built from domain primitives");
         self.body = Zeroizing::new(bytes);
-        debug_assert!(self.body.first() == Some(&b'{'), "every documented request body is a JSON object");
+        debug_assert!(
+            self.body.first() == Some(&b'{'),
+            "every documented request body is a JSON object"
+        );
         self
     }
 }
@@ -135,8 +145,12 @@ impl Answer {
         let Some(raw) = &self.data else {
             return Err(self.protocol(ProtocolErrorKind::MissingData));
         };
-        serde_json::from_str(raw.get())
-            .map_err(|e| self.protocol(ProtocolErrorKind::Shape { line: e.line(), column: e.column() }))
+        serde_json::from_str(raw.get()).map_err(|e| {
+            self.protocol(ProtocolErrorKind::Shape {
+                line: e.line(),
+                column: e.column(),
+            })
+        })
     }
 
     /// For operations documented with no `data` (changeOrder, cancelOrder,
@@ -147,7 +161,11 @@ impl Answer {
     }
 
     pub(crate) fn protocol(&self, kind: ProtocolErrorKind) -> Error {
-        Error::Protocol(ProtocolError { api: self.api, operation: self.operation, kind })
+        Error::Protocol(ProtocolError {
+            api: self.api,
+            operation: self.operation,
+            kind,
+        })
     }
 }
 
@@ -163,7 +181,12 @@ impl<A: Access> Client<A> {
     /// # Postconditions
     /// `Ok` only for `status == 0`. `status != 0` is `Error::Api`; anything
     /// that is not an envelope is `Error::Protocol`.
-    async fn send(&self, api: ApiGroup, credentials: Option<&Credentials>, call: Call) -> Result<Answer> {
+    async fn send(
+        &self,
+        api: ApiGroup,
+        credentials: Option<&Credentials>,
+        call: Call,
+    ) -> Result<Answer> {
         // TODO
         // let (base, pool) = match api { PublicRest => (&endpoints.public_rest, &public_pool), PrivateRest => (private..) };
         // let target = format!("{}{}{}", base.prefix, call.endpoint.path.as_str(), encode_query(&call.query));
@@ -183,7 +206,8 @@ impl Client<Authenticated> {
     /// Sends a signed private REST call.
     pub(crate) async fn private(&self, call: Call) -> Result<Answer> {
         let credentials = self.access.0.clone();
-        self.send(ApiGroup::PrivateRest, Some(&credentials), call).await
+        self.send(ApiGroup::PrivateRest, Some(&credentials), call)
+            .await
     }
 }
 
@@ -202,7 +226,10 @@ impl PageRequest {
     pub const MAX_COUNT: u8 = 100;
 
     /// Page 1, 100 items: the exchange's own default.
-    pub const FIRST: PageRequest = PageRequest { page: NonZeroU32::MIN, count: Self::MAX_COUNT };
+    pub const FIRST: PageRequest = PageRequest {
+        page: NonZeroU32::MIN,
+        count: Self::MAX_COUNT,
+    };
 
     /// A page number and a page size.
     ///
@@ -214,7 +241,10 @@ impl PageRequest {
     /// # Errors
     /// `Semantics` when `page == 0` or `count` is outside `1..=100`.
     pub fn new(page: u32, count: u8) -> core::result::Result<Self, InvalidValue> {
-        let invalid = |why| InvalidValue { primitive: Primitive::PageRequest, violation: Violation::Semantics(why) };
+        let invalid = |why| InvalidValue {
+            primitive: Primitive::PageRequest,
+            violation: Violation::Semantics(why),
+        };
         let page = NonZeroU32::new(page).ok_or(invalid("page 0"))?;
         if count == 0 || count > Self::MAX_COUNT {
             return Err(invalid("count outside 1..=100"));

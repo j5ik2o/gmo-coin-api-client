@@ -291,7 +291,9 @@ pub enum TransportErrorKind {
     Tls,
     Timeout(Phase),
     /// A size limit from `Limits` was exceeded before the data was buffered.
-    TooLarge { limit: u32 },
+    TooLarge {
+        limit: u32,
+    },
     /// The HTTP or WebSocket framing from the server was invalid.
     Framing(&'static str),
     /// The server closed the connection before a complete response.

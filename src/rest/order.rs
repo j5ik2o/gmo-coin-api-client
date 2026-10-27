@@ -56,10 +56,17 @@ pub enum OrderExecution {
     /// until the size fits, then sell at market (FAK). Spot `Sell` only.
     MarketCancelBefore,
     /// LIMIT. `losscut_price` is for leverage symbols only.
-    Limit { price: Price, time_in_force: LimitTimeInForce, losscut_price: Option<Price> },
+    Limit {
+        price: Price,
+        time_in_force: LimitTimeInForce,
+        losscut_price: Option<Price>,
+    },
     /// STOP (a stop-market order triggered at `price`). The exchange executes
     /// it FAK. `losscut_price` is for leverage symbols only.
-    Stop { price: Price, losscut_price: Option<Price> },
+    Stop {
+        price: Price,
+        losscut_price: Option<Price>,
+    },
 }
 
 impl NewOrder {
@@ -76,9 +83,14 @@ impl NewOrder {
             {
                 Err(ContractViolation::CancelBeforeRequiresSpotSell)
             }
-            OrderExecution::Limit { losscut_price: Some(_), .. } | OrderExecution::Stop { losscut_price: Some(_), .. }
-                if self.symbol.market() != Market::Leverage =>
-            {
+            OrderExecution::Limit {
+                losscut_price: Some(_),
+                ..
+            }
+            | OrderExecution::Stop {
+                losscut_price: Some(_),
+                ..
+            } if self.symbol.market() != Market::Leverage => {
                 Err(ContractViolation::LosscutRequiresLeverageSymbol)
             }
             _ => Ok(()),
@@ -129,8 +141,13 @@ pub enum CloseExecution {
     /// `cancelBefore: true` (MARKET, FAK). The exchange refuses it for orders
     /// tied to several positions.
     MarketCancelBefore,
-    Limit { price: Price, time_in_force: LimitTimeInForce },
-    Stop { price: Price },
+    Limit {
+        price: Price,
+        time_in_force: LimitTimeInForce,
+    },
+    Stop {
+        price: Price,
+    },
 }
 
 /// `POST /v1/closeBulkOrder`: close positions of one symbol and side up to `size`.
@@ -147,8 +164,13 @@ pub struct BulkClose {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BulkCloseExecution {
     Market,
-    Limit { price: Price, time_in_force: LimitTimeInForce },
-    Stop { price: Price },
+    Limit {
+        price: Price,
+        time_in_force: LimitTimeInForce,
+    },
+    Stop {
+        price: Price,
+    },
 }
 
 /// `POST /v1/cancelBulkOrder`: cancel up to 10 active orders by filter.

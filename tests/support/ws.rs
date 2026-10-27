@@ -31,7 +31,13 @@ pub struct WsControl {
 impl WsControl {
     /// Waits (up to `within`) until a subscribe for `channel` (and `symbol`,
     /// when given) arrives on the current connection, and returns it.
-    pub async fn subscribed(&self, api: Api, channel: &str, symbol: Option<&str>, within: Duration) -> Value {
+    pub async fn subscribed(
+        &self,
+        api: Api,
+        channel: &str,
+        symbol: Option<&str>,
+        within: Duration,
+    ) -> Value {
         let _ = (api, channel, symbol, within);
         todo!()
     }

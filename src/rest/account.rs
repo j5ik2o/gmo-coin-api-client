@@ -5,8 +5,8 @@ use serde::Deserialize;
 use super::{Call, endpoint};
 use crate::client::{Authenticated, Client};
 use crate::domain::{
-    Amount, BusinessDate, BusinessDateRange, CryptoShortfallStatus, Decimal, FeeType, HistoryWindow,
-    MarginCallStatus, Price, Size, Symbol, Timestamp, TransferStatus, TransferType,
+    Amount, BusinessDate, BusinessDateRange, CryptoShortfallStatus, Decimal, FeeType,
+    HistoryWindow, MarginCallStatus, Price, Size, Symbol, Timestamp, TransferStatus, TransferType,
 };
 use crate::error::Result;
 
@@ -53,9 +53,20 @@ pub struct TradingVolume {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum VolumeLimit {
     /// Has `todayLimitBuySize` and `todayLimitSellSize`.
-    Spot { symbol: Symbol, today_limit_buy_size: Size, today_limit_sell_size: Size, taker_fee: Decimal, maker_fee: Decimal },
+    Spot {
+        symbol: Symbol,
+        today_limit_buy_size: Size,
+        today_limit_sell_size: Size,
+        taker_fee: Decimal,
+        maker_fee: Decimal,
+    },
     /// Has `todayLimitOpenSize`. The symbol is spelled `BTC/JPY` here.
-    Leverage { symbol: Symbol, today_limit_open_size: Size, taker_fee: Decimal, maker_fee: Decimal },
+    Leverage {
+        symbol: Symbol,
+        today_limit_open_size: Size,
+        taker_fee: Decimal,
+        maker_fee: Decimal,
+    },
 }
 
 impl<'de> Deserialize<'de> for VolumeLimit {
@@ -140,7 +151,9 @@ impl Client<Authenticated> {
     /// # Errors
     /// The [REST set](crate::rest#errors).
     pub async fn margin(&self) -> Result<Margin> {
-        self.private(Call::new(endpoint!(GET "/v1/account/margin"))).await?.data()
+        self.private(Call::new(endpoint!(GET "/v1/account/margin")))
+            .await?
+            .data()
     }
 
     /// `GET /private/v1/account/assets`.
@@ -154,7 +167,9 @@ impl Client<Authenticated> {
     /// # Errors
     /// The [REST set](crate::rest#errors).
     pub async fn assets(&self) -> Result<Vec<Asset>> {
-        self.private(Call::new(endpoint!(GET "/v1/account/assets"))).await?.data()
+        self.private(Call::new(endpoint!(GET "/v1/account/assets")))
+            .await?
+            .data()
     }
 
     /// `GET /private/v1/account/tradingVolume`.
@@ -168,7 +183,9 @@ impl Client<Authenticated> {
     /// # Errors
     /// The [REST set](crate::rest#errors).
     pub async fn trading_volume(&self) -> Result<TradingVolume> {
-        self.private(Call::new(endpoint!(GET "/v1/account/tradingVolume"))).await?.data()
+        self.private(Call::new(endpoint!(GET "/v1/account/tradingVolume")))
+            .await?
+            .data()
     }
 
     /// `GET /private/v1/account/fiatDeposit/history`.
@@ -196,7 +213,10 @@ impl Client<Authenticated> {
     ///
     /// # Errors
     /// The [REST set](crate::rest#errors).
-    pub async fn fiat_withdrawal_history(&self, window: HistoryWindow) -> Result<Vec<FiatTransfer>> {
+    pub async fn fiat_withdrawal_history(
+        &self,
+        window: HistoryWindow,
+    ) -> Result<Vec<FiatTransfer>> {
         let _ = window;
         todo!()
     }
@@ -211,7 +231,11 @@ impl Client<Authenticated> {
     ///
     /// # Errors
     /// The [REST set](crate::rest#errors).
-    pub async fn deposit_history(&self, symbol: Symbol, window: HistoryWindow) -> Result<Vec<CryptoTransfer>> {
+    pub async fn deposit_history(
+        &self,
+        symbol: Symbol,
+        window: HistoryWindow,
+    ) -> Result<Vec<CryptoTransfer>> {
         let mut call = Call::new(endpoint!(GET "/v1/account/deposit/history"))
             .query("symbol", symbol)
             .query("fromTimestamp", window.from());
@@ -231,7 +255,11 @@ impl Client<Authenticated> {
     ///
     /// # Errors
     /// The [REST set](crate::rest#errors).
-    pub async fn withdrawal_history(&self, symbol: Symbol, window: HistoryWindow) -> Result<Vec<CryptoTransfer>> {
+    pub async fn withdrawal_history(
+        &self,
+        symbol: Symbol,
+        window: HistoryWindow,
+    ) -> Result<Vec<CryptoTransfer>> {
         let _ = (symbol, window);
         todo!()
     }
@@ -249,7 +277,12 @@ impl Client<Authenticated> {
     /// # Errors
     /// `Api` with ERR-5016 when the exchange times out; the docs say retry
     /// once, then narrow the range.
-    pub async fn exchange_fee_history(&self, range: BusinessDateRange, count: u8, cursor: Option<&str>) -> Result<ExchangeFeePage> {
+    pub async fn exchange_fee_history(
+        &self,
+        range: BusinessDateRange,
+        count: u8,
+        cursor: Option<&str>,
+    ) -> Result<ExchangeFeePage> {
         let _ = (range, count, cursor);
         todo!()
     }

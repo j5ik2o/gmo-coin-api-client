@@ -68,7 +68,11 @@ pub enum Primitive {
 #[non_exhaustive]
 pub enum Violation {
     /// Step 1. Longer than `max` bytes, or shorter than `min`.
-    Size { min: usize, max: usize, actual: usize },
+    Size {
+        min: usize,
+        max: usize,
+        actual: usize,
+    },
     /// Step 2. A byte outside the allowed set, at this byte offset.
     Lexical { offset: usize },
     /// Step 3. Bytes are allowed but the structure is wrong.
@@ -109,10 +113,16 @@ pub(crate) fn check_size_and_lexical(
 ) -> Result<(), InvalidValue> {
     let actual = input.len();
     if actual < min || actual > max {
-        return Err(InvalidValue { primitive, violation: Violation::Size { min, max, actual } });
+        return Err(InvalidValue {
+            primitive,
+            violation: Violation::Size { min, max, actual },
+        });
     }
     match input.bytes().position(|b| !allowed(b)) {
-        Some(offset) => Err(InvalidValue { primitive, violation: Violation::Lexical { offset } }),
+        Some(offset) => Err(InvalidValue {
+            primitive,
+            violation: Violation::Lexical { offset },
+        }),
         None => Ok(()),
     }
 }

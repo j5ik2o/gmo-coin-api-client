@@ -33,7 +33,9 @@ pub(crate) struct Connector {
 
 impl Connector {
     pub(crate) fn new(tls_config: Arc<tokio_rustls::rustls::ClientConfig>) -> Self {
-        Self { tls: TlsConnector::from(tls_config) }
+        Self {
+            tls: TlsConnector::from(tls_config),
+        }
     }
 
     /// TCP connect plus, for `Transport::Tls`, the TLS handshake, both inside
@@ -42,7 +44,11 @@ impl Connector {
     /// # Postconditions
     /// A `Stream::Plain` is returned only for `Transport::Plain`, which only
     /// exists for loopback addresses. No DNS lookup happens for plain.
-    pub(crate) async fn connect(&self, base: &Base, timeouts: &Timeouts) -> Result<Stream, TransportErrorKind> {
+    pub(crate) async fn connect(
+        &self,
+        base: &Base,
+        timeouts: &Timeouts,
+    ) -> Result<Stream, TransportErrorKind> {
         // TODO tokio::time::timeout(timeouts.connect.get(), async {
         //   match &base.transport {
         //     Transport::Plain(ip) => TcpStream::connect((ip.ip(), base.port)) => Stream::Plain,

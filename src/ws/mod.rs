@@ -46,7 +46,10 @@ pub enum PublicChannel {
     Ticker(Symbol),
     OrderBooks(Symbol),
     /// `taker_only` sends `option: "TAKER_ONLY"`.
-    Trades { symbol: Symbol, taker_only: bool },
+    Trades {
+        symbol: Symbol,
+        taker_only: bool,
+    },
 }
 
 /// Private channels. One of each per connection.
@@ -56,7 +59,9 @@ pub enum PrivateChannel {
     OrderEvents,
     PositionEvents,
     /// `periodic` sends `option: "PERIODIC"` (a summary every 5 seconds).
-    PositionSummaryEvents { periodic: bool },
+    PositionSummaryEvents {
+        periodic: bool,
+    },
 }
 
 impl FeedChannel for PublicChannel {}
@@ -210,7 +215,9 @@ impl<A: Access> Client<A> {
     /// # Errors
     /// Infallible.
     pub fn public_feed(&self) -> Feed<PublicChannel> {
-        Feed { session: session::Session::public(self.inner.clone()) }
+        Feed {
+            session: session::Session::public(self.inner.clone()),
+        }
     }
 }
 
@@ -227,7 +234,9 @@ impl Client<Authenticated> {
     /// # Errors
     /// Infallible.
     pub fn private_feed(&self) -> Feed<PrivateChannel> {
-        Feed { session: session::Session::private(self.clone()) }
+        Feed {
+            session: session::Session::private(self.clone()),
+        }
     }
 }
 
@@ -247,7 +256,10 @@ impl Pacer {
     pub(crate) const INTERVAL: Duration = Duration::from_millis(1_050);
 
     pub(crate) fn new() -> Self {
-        Self { origin: Instant::now(), next_free_nanos: AtomicU64::new(0) }
+        Self {
+            origin: Instant::now(),
+            next_free_nanos: AtomicU64::new(0),
+        }
     }
 
     /// Claims the next slot and returns when it starts.

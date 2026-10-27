@@ -11,16 +11,25 @@ use super::{SignatureCheck, TEST_SECRET};
 /// path drops the `/private` prefix and any query. `body` is the raw bytes
 /// received, not a re-serialization, so a client that signs one byte string
 /// and sends another fails here.
-pub fn check(timestamp: Option<&str>, sign_hex: Option<&str>, method: &str, request_path: &str, body: &[u8]) -> SignatureCheck {
+pub fn check(
+    timestamp: Option<&str>,
+    sign_hex: Option<&str>,
+    method: &str,
+    request_path: &str,
+    body: &[u8],
+) -> SignatureCheck {
     let (Some(timestamp), Some(sign_hex)) = (timestamp, sign_hex) else {
         return SignatureCheck::Absent;
     };
-    let signed_path = request_path.strip_prefix("/private").unwrap_or(request_path);
+    let signed_path = request_path
+        .strip_prefix("/private")
+        .unwrap_or(request_path);
     let signed_path = signed_path.split('?').next().unwrap_or(signed_path);
     let Some(tag) = decode_hex(sign_hex) else {
         return SignatureCheck::Invalid;
     };
-    let mut message = Vec::with_capacity(timestamp.len() + method.len() + signed_path.len() + body.len());
+    let mut message =
+        Vec::with_capacity(timestamp.len() + method.len() + signed_path.len() + body.len());
     message.extend_from_slice(timestamp.as_bytes());
     message.extend_from_slice(method.as_bytes());
     message.extend_from_slice(signed_path.as_bytes());

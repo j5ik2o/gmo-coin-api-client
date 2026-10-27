@@ -116,7 +116,10 @@ impl CancelOrdersOutcome {
     }
 
     /// Checks the postconditions above against what was sent.
-    fn from_wire(sent: &Batch<OrderId, 10>, wire: WireCancelOrders<'_>) -> core::result::Result<Self, ProtocolErrorKind> {
+    fn from_wire(
+        sent: &Batch<OrderId, 10>,
+        wire: WireCancelOrders<'_>,
+    ) -> core::result::Result<Self, ProtocolErrorKind> {
         let violation = |p| ProtocolErrorKind::Postcondition(p);
         let mut seen: Vec<OrderId> = Vec::with_capacity(sent.as_slice().len());
         let mut note = |id: OrderId| {
@@ -136,9 +139,15 @@ impl CancelOrdersOutcome {
         for f in &wire.failed {
             note(f.order_id)?;
             let message = message(&f.message).ok_or(ProtocolErrorKind::MalformedErrorEnvelope)?;
-            rejected.push(CancelRejection { order_id: f.order_id, message });
+            rejected.push(CancelRejection {
+                order_id: f.order_id,
+                message,
+            });
         }
-        Ok(Self { cancelled: wire.success, rejected })
+        Ok(Self {
+            cancelled: wire.success,
+            rejected,
+        })
     }
 }
 
@@ -227,7 +236,11 @@ impl Client<Authenticated> {
     ///
     /// # Errors
     /// The [REST set](crate::rest#errors).
-    pub async fn latest_executions(&self, symbol: Symbol, page: PageRequest) -> Result<Page<Execution>> {
+    pub async fn latest_executions(
+        &self,
+        symbol: Symbol,
+        page: PageRequest,
+    ) -> Result<Page<Execution>> {
         let _ = (symbol, page);
         todo!()
     }
@@ -243,7 +256,11 @@ impl Client<Authenticated> {
     ///
     /// # Errors
     /// The [REST set](crate::rest#errors).
-    pub async fn open_positions(&self, symbol: Symbol, page: PageRequest) -> Result<Page<Position>> {
+    pub async fn open_positions(
+        &self,
+        symbol: Symbol,
+        page: PageRequest,
+    ) -> Result<Page<Position>> {
         let _ = (symbol, page);
         todo!()
     }
@@ -297,7 +314,12 @@ impl Client<Authenticated> {
     ///
     /// # Errors
     /// The [REST set](crate::rest#errors).
-    pub async fn change_order(&self, order_id: OrderId, price: Price, losscut_price: Option<Price>) -> Result<()> {
+    pub async fn change_order(
+        &self,
+        order_id: OrderId,
+        price: Price,
+        losscut_price: Option<Price>,
+    ) -> Result<()> {
         let _ = (order_id, price, losscut_price);
         todo!()
     }
@@ -336,13 +358,18 @@ impl Client<Authenticated> {
     ///
     /// # Errors
     /// The [REST set](crate::rest#errors).
-    pub async fn cancel_orders(&self, order_ids: &Batch<OrderId, 10>) -> Result<CancelOrdersOutcome> {
+    pub async fn cancel_orders(
+        &self,
+        order_ids: &Batch<OrderId, 10>,
+    ) -> Result<CancelOrdersOutcome> {
         #[derive(Serialize)]
         #[serde(rename_all = "camelCase")]
         struct Body<'a> {
             order_ids: &'a [OrderId],
         }
-        let call = Call::new(endpoint!(POST "/v1/cancelOrders")).json(&Body { order_ids: order_ids.as_slice() });
+        let call = Call::new(endpoint!(POST "/v1/cancelOrders")).json(&Body {
+            order_ids: order_ids.as_slice(),
+        });
         let answer = self.private(call).await?;
         // TODO decode WireCancelOrders from the answer's raw data (borrowed),
         // then CancelOrdersOutcome::from_wire(order_ids, wire)
@@ -409,7 +436,11 @@ impl Client<Authenticated> {
     ///
     /// # Errors
     /// The [REST set](crate::rest#errors).
-    pub async fn change_losscut_price(&self, position_id: PositionId, losscut_price: Price) -> Result<()> {
+    pub async fn change_losscut_price(
+        &self,
+        position_id: PositionId,
+        losscut_price: Price,
+    ) -> Result<()> {
         let _ = (position_id, losscut_price);
         todo!()
     }

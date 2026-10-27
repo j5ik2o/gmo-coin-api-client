@@ -28,7 +28,9 @@ impl Client<Authenticated> {
     /// # Postconditions
     /// The token passed [`AccessToken::parse`] (URL-path safe, bounded).
     pub(crate) async fn acquire_ws_token(&self) -> Result<AccessToken> {
-        let answer = self.private(Call::new(endpoint!(POST "/v1/ws-auth"))).await?;
+        let answer = self
+            .private(Call::new(endpoint!(POST "/v1/ws-auth")))
+            .await?;
         // TODO data is a JSON string. Decode it as a borrowed str into a
         // Zeroizing buffer, then AccessToken::parse; on failure return
         // answer.protocol(Shape { .. }) without the serde message (it would
@@ -40,13 +42,17 @@ impl Client<Authenticated> {
     /// `PUT /private/v1/ws-auth {"token"}`: resets the expiry to 60 minutes.
     /// Idempotent, so a cancelled or repeated call is harmless.
     pub(crate) async fn extend_ws_token(&self, token: &AccessToken) -> Result<()> {
-        let call = Call::new(endpoint!(PUT "/v1/ws-auth")).json(&TokenBody { token: token.reveal() });
+        let call = Call::new(endpoint!(PUT "/v1/ws-auth")).json(&TokenBody {
+            token: token.reveal(),
+        });
         self.private(call).await?.empty()
     }
 
     /// `DELETE /private/v1/ws-auth {"token"}`. Consumes the token.
     pub(crate) async fn delete_ws_token(&self, token: AccessToken) -> Result<()> {
-        let call = Call::new(endpoint!(DELETE "/v1/ws-auth")).json(&TokenBody { token: token.reveal() });
+        let call = Call::new(endpoint!(DELETE "/v1/ws-auth")).json(&TokenBody {
+            token: token.reveal(),
+        });
         self.private(call).await?.empty()
     }
 }

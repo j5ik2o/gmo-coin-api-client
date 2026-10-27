@@ -152,7 +152,10 @@ impl ClientOrderId {
         })?;
         let mut bytes = [0u8; Self::MAX_LEN];
         bytes[..text.len()].copy_from_slice(text.as_bytes());
-        Ok(Self { len: text.len() as u8, bytes })
+        Ok(Self {
+            len: text.len() as u8,
+            bytes,
+        })
     }
 
     /// 32 lowercase hex characters from the OS random source (via ring,
@@ -243,7 +246,11 @@ impl<T: Eq, const MAX: usize> Batch<T, MAX> {
         if actual == 0 || actual > MAX {
             return Err(InvalidValue {
                 primitive: Primitive::Batch,
-                violation: Violation::Size { min: 1, max: MAX, actual },
+                violation: Violation::Size {
+                    min: 1,
+                    max: MAX,
+                    actual,
+                },
             });
         }
         // MAX is at most 10 in every use, so the quadratic scan is cheaper than hashing.

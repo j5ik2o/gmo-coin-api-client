@@ -4,9 +4,9 @@
 use serde::Deserialize;
 
 use crate::domain::{
-    CancelType, ClientOrderId, Decimal, ExecutionMsgType, ExecutionType, OrderId, OrderMsgType,
-    OrderStatus, PositionId, PositionMsgType, Price, SettleType, Side, Size, SummaryMsgType, Symbol,
-    TimeInForce, Timestamp, ExecutionId,
+    CancelType, ClientOrderId, Decimal, ExecutionId, ExecutionMsgType, ExecutionType, OrderId,
+    OrderMsgType, OrderStatus, PositionId, PositionMsgType, Price, SettleType, Side, Size,
+    SummaryMsgType, Symbol, TimeInForce, Timestamp,
 };
 use crate::rest::OrderBookLevel;
 

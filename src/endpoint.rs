@@ -162,7 +162,10 @@ impl LoopbackIp {
         if ip.is_loopback() {
             Ok(Self(ip))
         } else {
-            Err(InvalidValue { primitive: Primitive::BaseUrl, violation: Violation::Semantics("not loopback") })
+            Err(InvalidValue {
+                primitive: Primitive::BaseUrl,
+                violation: Violation::Semantics("not loopback"),
+            })
         }
     }
 
