@@ -160,7 +160,6 @@ pub(crate) async fn round_trip(
     let max_body = config.limits.max_response_bytes.get();
     let mut retried = false;
     loop {
-        // 再試行は必ず新しい接続で行う。古い接続をもう一度引くと同じ失敗を繰り返すだけである。
         let pooled = if retried { None } else { route.pool.checkout() };
         let (mut sender, reused) = match pooled {
             Some(sender) => (sender, true),

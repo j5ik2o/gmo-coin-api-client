@@ -57,7 +57,6 @@ async fn public_feed_records_commands_pushes_text_and_answers_pings() {
         let state = mock.ws();
         async move { state.ping(Api::Public, WAIT).await }
     });
-    // tungstenite answers the ping while the client reads.
     let ping = client.next().await.unwrap().unwrap();
     assert!(matches!(ping, Message::Ping(_)), "{ping:?}");
     client.flush().await.unwrap();

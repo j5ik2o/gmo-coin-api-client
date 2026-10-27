@@ -713,8 +713,6 @@ impl<C: FeedChannel> Session<C> {
                 C::API,
                 TransportErrorKind::Timeout(Phase::WsIdle),
             )))),
-            // タイマーは select の前の `flush_since` から組んだ。同じ select の
-            // 中で flush が完了していれば古いので、今の状態で判定し直す。
             Step::WriteTimedOut => match conn.flush_since {
                 Some(since) if since + timeouts.ws_write.get() <= Instant::now() => Some(Ok(self
                     .drop_connection(live_failure(
@@ -886,7 +884,6 @@ impl<C: FeedChannel> Session<C> {
         } = self.auth
             && lease.is_live(Instant::now())
         {
-            // 延長の future がトークンを借りていれば先に手放す。
             drop(extend);
             if let Ok(token) = Arc::try_unwrap(lease.token) {
                 let deleted = client.delete_ws_token(token).await;

@@ -210,7 +210,6 @@ mod tests {
             protocol_kind(classify(200, &long)),
             ProtocolErrorKind::MalformedErrorEnvelope
         );
-        // The HTTP status is not trusted on its own: a well-formed error envelope on a 500 is still an API error.
         assert!(matches!(
             classify(
                 500,
@@ -218,7 +217,6 @@ mod tests {
             ),
             Err(Error::Api(_))
         ));
-        // An escaped message string still decodes.
         match classify(
             200,
             r#"{"status":1,"messages":[{"message_code":"ERR-5106","message_string":"bad \"param\""}]}"#,

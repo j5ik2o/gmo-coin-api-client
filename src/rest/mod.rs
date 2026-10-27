@@ -239,7 +239,6 @@ impl<A: Access> Client<A> {
         };
         let target = call.target(&base.prefix);
         let host = base.host_header();
-        // 古い接続での GET 再試行ではもう一度呼ばれる: タイムスタンプと署名が新しくなる。
         let mut encode = || {
             let mut request = http::Request::builder()
                 .method(call.endpoint.method.to_http())
