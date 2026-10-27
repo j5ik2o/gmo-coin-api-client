@@ -17,8 +17,9 @@
 //! - `Connected` の間、`sent.subscribed` はこの接続に書き込みを始め、
 //!   サーバに拒否されていない subscribe の集合と等しい。再接続のたびに
 //!   空から始まる。
-//! - `Connected` の間、取得済みのペーサのスロットは高々 1 つで、コマンドを
-//!   書くか、書くべきコマンドがなくなるまで `Connection::slot` に残る。
+//! - コマンドは、同じポーリングの中で `Pacer::take` が通った直後にだけ書く。
+//!   ペーサの予約は持たないので、キャンセルで失われるものも、遅れて使われる
+//!   ものもない。
 
 use std::collections::BTreeMap;
 use std::future::{Future, poll_fn};
@@ -160,16 +161,15 @@ pub(crate) struct Connection {
     last_frame_at: Instant,
     /// 最初に `poll_flush` が `Pending` を返した時刻。`ws_write` を超えたら切る。
     flush_since: Option<Instant>,
-    /// 次のコマンドのために取得したペーサのスロット。
-    slot: Option<Instant>,
 }
 
 /// `Connected` で 1 回のポーリングが観測したこと。
 enum Step {
     Message(Message),
     Failed(TransportErrorKind),
-    /// スロットが来て、ソケットが書き込みを受け付けられる。
+    /// ペーサの時刻が来て、ソケットが書き込みを受け付けられる。
     WriteReady,
+    /// ペーサの「次に書いてよい時刻」に達した。
     SlotReached,
     Idle,
     WriteTimedOut,
@@ -382,7 +382,6 @@ impl<C: FeedChannel> Session<C> {
                     connected_at: now,
                     last_frame_at: now,
                     flush_since: None,
-                    slot: None,
                 };
                 self.state = State::Connected(Box::new(connection), Sent::empty());
                 if self.attempt > 0 {
@@ -454,12 +453,7 @@ impl<C: FeedChannel> Session<C> {
         let now = Instant::now();
 
         let command = next_command::<C>(desired, &sent.subscribed);
-        if command.is_none() {
-            conn.slot = None;
-        } else if conn.slot.is_none() {
-            conn.slot = Some(pacer.claim());
-        }
-        let slot = conn.slot;
+        let slot = command.as_ref().map(|_| pacer.next_free());
         let want_write = slot.is_some_and(|at| at <= now);
         let idle_at = conn.last_frame_at + timeouts.ws_idle.get();
         let write_deadline = conn
@@ -518,6 +512,9 @@ impl<C: FeedChannel> Session<C> {
             Step::Failed(kind) => Some(Ok(self.drop_connection(live_failure(C::API, kind)))),
             Step::WriteReady => {
                 let (channel, subscribe) = command.expect("want_write implies a command");
+                if pacer.take().is_err() {
+                    return None;
+                }
                 let frame = Message::text(channel.command(subscribe));
                 if let Err(e) = conn.stream.start_send_unpin(frame) {
                     let kind = ws::error_kind(&e, &inner.config.limits);
@@ -531,7 +528,6 @@ impl<C: FeedChannel> Session<C> {
                     sent.subscribed.remove(&key);
                     Written::Unsubscribe(channel)
                 });
-                conn.slot = None;
                 conn.flush_since.get_or_insert_with(Instant::now);
                 None
             }

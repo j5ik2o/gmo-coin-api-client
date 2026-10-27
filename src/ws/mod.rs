@@ -168,8 +168,8 @@ pub enum DisconnectReason {
 ///   サーバは ping (1 分に 1 回) が 3 回続けて答えられないと接続を切る。
 ///   呼ばれていないフィードは、次に呼ばれたときに再接続する。
 /// - `next` はキャンセルしても安全である。すべての進捗 (書きかけのフレーム、
-///   進行中の接続、購読の差分、取得したペーサのスロット) は `self` にあるので、
-///   `tokio::select!` の中で `next` を使っても何も失われない。
+///   進行中の接続、購読の差分) は `self` にあるので、`tokio::select!` の中で
+///   `next` を使っても何も失われない。
 /// - フィードを終えるには `close` を呼ぶこと。drop は close ハンドシェイクなしで
 ///   ソケットを閉じ、Private フィードではトークンを削除しない。そのトークンは
 ///   最長 60 分生き続け、その間は口座の上限 5 個の 1 つを占める。
@@ -411,13 +411,15 @@ impl Client<Authenticated> {
 /// IP ごとのコマンド予算: subscribe または unsubscribe は 1 秒に 1 回。
 ///
 /// 上限は接続ごとではなく IP ごとなので、1 つの `Client` (とその複製) から
-/// 作られたすべてのフィードが共有する。共有状態は「次に空くスロット」の
-/// アトミック 1 つで、compare-and-swap で取得する。`.await` をまたいで握る
-/// ロックはない。取得した後にキャンセルされたコマンドのスロットは無駄になる
-/// が、それはペースを遅くするだけで、速くすることは決してない。
+/// 作られたすべてのフィードが共有する。共有状態は「次に書いてよい時刻」の
+/// アトミック 1 つである。予約はしない。書く直前に [`Pacer::take`] で
+/// compare-and-swap し、通った側がその場で書く。次の時刻は実際に取った
+/// 時刻から数えるので、遅れて書いたフィードがあっても、実際の送信同士が
+/// `interval` 未満に近づくことはない。`.await` をまたいで握るロックはない。
 ///
 /// # 不変条件
-/// `claim` が返す時刻は単調で、連続する 2 つは少なくとも `interval` 離れている。
+/// `take` が `Ok` を返す時刻は単調で、連続する 2 つは少なくとも `interval`
+/// 離れている。
 pub(crate) struct Pacer {
     origin: Instant,
     next_free_nanos: AtomicU64,
@@ -437,26 +439,29 @@ impl Pacer {
         }
     }
 
-    /// 次のスロットを取得し、その開始時刻を返す。
+    /// 次に書いてよい時刻。現在以前なら `take` が通り得る。
+    pub(crate) fn next_free(&self) -> Instant {
+        self.origin + Duration::from_nanos(self.next_free_nanos.load(Ordering::Acquire))
+    }
+
+    /// 今から `interval` の間を取る。呼び出し側は `Ok` の直後、`.await` を
+    /// 挟まずに書くこと。
     ///
     /// # 事後条件
-    /// 返る時刻は現在以降で、直前に取得されたスロットより `interval` 以上後。
-    pub(crate) fn claim(&self) -> Instant {
+    /// `Ok` なら、次に書いてよい時刻は現在 + `interval` になっている。
+    /// `Err` は次に書いてよい時刻 (現在より後、または別の呼び出し側が
+    /// 先に取った後の値) で、呼び出し側はそれまで待って取り直す。
+    pub(crate) fn take(&self) -> Result<(), Instant> {
         let interval = self.interval_nanos.load(Ordering::Relaxed);
         let now = self.origin.elapsed().as_nanos() as u64;
-        let mut current = self.next_free_nanos.load(Ordering::Relaxed);
-        loop {
-            let start = current.max(now);
-            match self.next_free_nanos.compare_exchange_weak(
-                current,
-                start + interval,
-                Ordering::AcqRel,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => return self.origin + Duration::from_nanos(start),
-                Err(actual) => current = actual,
-            }
+        let current = self.next_free_nanos.load(Ordering::Acquire);
+        if current > now {
+            return Err(self.origin + Duration::from_nanos(current));
         }
+        self.next_free_nanos
+            .compare_exchange(current, now + interval, Ordering::AcqRel, Ordering::Acquire)
+            .map(|_| ())
+            .map_err(|actual| self.origin + Duration::from_nanos(actual))
     }
 
     fn unpace(&self) {
@@ -469,43 +474,46 @@ mod tests {
     use super::*;
 
     #[test]
-    fn slots_are_spaced_by_the_interval_and_never_in_the_past() {
+    fn a_take_blocks_the_next_one_for_the_interval() {
         let pacer = Pacer::new();
+        assert!(pacer.next_free() <= Instant::now());
         let before = Instant::now();
-        let first = pacer.claim();
-        let second = pacer.claim();
-        let third = pacer.claim();
-        assert!(first >= before);
-        assert!(first <= Instant::now());
-        assert_eq!(second - first, Pacer::INTERVAL);
-        assert_eq!(third - second, Pacer::INTERVAL);
+        pacer.take().expect("the first take is free");
+        let after = Instant::now();
+        let next = pacer.take().expect_err("the interval has not elapsed");
+        assert!(next >= before + Pacer::INTERVAL && next <= after + Pacer::INTERVAL);
+        assert_eq!(pacer.next_free(), next);
     }
 
     #[test]
-    fn an_unpaced_pacer_hands_out_the_present() {
+    fn an_unpaced_pacer_lets_consecutive_takes_through() {
         let pacer = Pacer::new();
         pacer.unpace();
-        let first = pacer.claim();
-        let second = pacer.claim();
-        assert!(second >= first);
-        assert!(second <= Instant::now());
+        pacer.take().unwrap();
+        pacer.take().unwrap();
+        assert!(pacer.next_free() <= Instant::now());
     }
 
     #[test]
-    fn claims_from_many_threads_never_overlap() {
+    fn only_one_of_many_threads_takes_the_same_interval() {
         let pacer = std::sync::Arc::new(Pacer::new());
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
         let handles: Vec<_> = (0..8)
             .map(|_| {
                 let pacer = pacer.clone();
-                std::thread::spawn(move || (0..50).map(|_| pacer.claim()).collect::<Vec<_>>())
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    pacer.take().is_ok()
+                })
             })
             .collect();
-        let mut slots: Vec<Instant> = handles
+        let taken = handles
             .into_iter()
-            .flat_map(|h| h.join().unwrap())
-            .collect();
-        slots.sort();
-        assert!(slots.windows(2).all(|w| w[1] - w[0] >= Pacer::INTERVAL));
+            .map(|h| h.join().unwrap())
+            .filter(|took| *took)
+            .count();
+        assert_eq!(taken, 1);
     }
 
     #[test]

@@ -2,7 +2,8 @@
 //! ペーシング、Private トークンのライフサイクル。
 //!
 //! ペーシング (1 秒に 1 コマンド) を検証するのは
-//! `subscribe_commands_are_paced_one_per_second` だけで、他のテストは
+//! `subscribe_commands_are_paced_one_per_second` と
+//! `commands_stay_one_second_apart_*` だけで、他のテストは
 //! `unpaced_ws_commands_for_loopback` で待ち時間を省く。
 
 mod support;
@@ -101,6 +102,62 @@ async fn subscribe_commands_are_paced_one_per_second() {
             .windows(2)
             .all(|w| w[1] - w[0] >= Duration::from_secs(1)),
         "per-IP limit respected"
+    );
+}
+
+/// 3 銘柄を subscribe し、1 つ目の subscribe の後にデータイベントで `next`
+/// から戻り、`away` の間 `next` を呼ばずに置いてから再開する (使い方の契約
+/// である 2 分の範囲内)。モックが記録したコマンドの到着時刻の間隔を返す。
+async fn command_gaps_with_the_caller_away(away: Duration) -> Vec<Duration> {
+    let mock = MockExchange::start().await;
+    let ws = mock.ws();
+    let mut feed = mock.client().public_feed();
+    for symbol in [Symbol::BTC, Symbol::ETH, Symbol::XRP] {
+        feed.subscribe(PublicChannel::Ticker(symbol)).unwrap();
+    }
+
+    let first = tokio::spawn(async move {
+        let event = feed.next().await;
+        (feed, event)
+    });
+    ws.subscribed(Api::Public, "ticker", Some("BTC"), WAIT)
+        .await;
+    ws.push(Api::Public, &fixture("ws_public_ticker.json"));
+    let (mut feed, event) = first.await.unwrap();
+    assert!(matches!(event, Ok(PublicEvent::Ticker(_))), "{event:?}");
+
+    tokio::time::sleep(away).await;
+
+    let driver = tokio::spawn(async move {
+        let _ = tokio::time::timeout(Duration::from_secs(4), feed.next()).await;
+    });
+    ws.subscribed(Api::Public, "ticker", Some("XRP"), WAIT)
+        .await;
+    driver.abort();
+
+    let times: Vec<_> = ws.commands().iter().map(|(at, _, _)| *at).collect();
+    assert_eq!(times.len(), 3);
+    times.windows(2).map(|w| w[1] - w[0]).collect()
+}
+
+/// 実際の送信同士の間隔を確かめる。呼び出し側が遅れて戻ると、遅れた分だけ
+/// 2 つ目のコマンドが遅れ、3 つ目はそこからさらに 1 秒以上後に出る。
+/// 下限の 1 秒は、ペーサの間隔 (1.05 秒) から計時のずれの分を引いたもの。
+#[tokio::test]
+async fn commands_stay_one_second_apart_when_the_caller_returns_1300ms_late() {
+    let gaps = command_gaps_with_the_caller_away(Duration::from_millis(1300)).await;
+    assert!(
+        gaps.iter().all(|g| *g >= Duration::from_secs(1)),
+        "per-IP limit violated: {gaps:?}"
+    );
+}
+
+#[tokio::test]
+async fn commands_stay_one_second_apart_when_the_caller_returns_2500ms_late() {
+    let gaps = command_gaps_with_the_caller_away(Duration::from_millis(2500)).await;
+    assert!(
+        gaps.iter().all(|g| *g >= Duration::from_secs(1)),
+        "per-IP limit violated: {gaps:?}"
     );
 }
 
@@ -881,10 +938,10 @@ async fn a_rejected_subscribe_is_dropped_until_the_caller_subscribes_again() {
 /// 置き換えが拒否されたら、間に古いデータが流れていても拒否は置き換えに
 /// 帰属し、置き換えは集合から外れる。
 ///
-/// 順序の作り方: 置き換えを登録して `next` を 1 回だけポーリングし、ペーサの
-/// スロットを取らせる (スロットは打ち切りを越えて残る)。次に trade を push
-/// してモックに譲り、ソケットに載せる。続く `next` はスロットが既に来て
-/// いるので読む前に書き、その trade は置き換えの書き込みの後、モックの
+/// 順序の作り方: 置き換えを登録し、古い購読の trade を先に push してモックに
+/// 譲り、クライアントのソケットに載せてから `next` を呼ぶ。`next` は
+/// ペーサの時刻が来ていれば読む前に書く (`poll_socket` の順序) ので、
+/// 置き換えはその trade より前に書かれ、trade は置き換えの後、モックの
 /// 拒否の前に読まれる。譲りが短すぎた場合に起きるのは偽の合格であって、
 /// 偽の失敗ではない。
 #[tokio::test]
@@ -918,11 +975,6 @@ async fn a_rejected_replacement_is_not_confirmed_by_the_old_subscription_data() 
         "ERR-5106 Invalid request parameter. option",
     );
     feed.subscribe(taker_only.clone()).unwrap();
-    let claimed = tokio::time::timeout(Duration::ZERO, feed.next()).await;
-    assert!(
-        claimed.is_err(),
-        "the first poll only claims the slot: {claimed:?}"
-    );
     ws.push(Api::Public, &fixture("ws_public_trades.json"));
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(
