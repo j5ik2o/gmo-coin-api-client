@@ -59,10 +59,10 @@ pub use domain::{
     Amount, Batch, BusinessDate, BusinessDateRange, CancelType, ClientOrderId,
     CryptoShortfallStatus, Decimal, ExchangeStatus, ExecutionId, ExecutionMsgType, ExecutionType,
     FeeType, HistoryWindow, IntradayInterval, InvalidValue, KlineSpan, LimitTimeInForce,
-    LongInterval, MarginCallStatus, Market, OrderId, OrderMsgType, OrderStatus, OrderType,
-    PositionId, PositionMsgType, Price, Primitive, SettleFilter, SettleType, Side, Size,
-    SummaryMsgType, Symbol, TimeInForce, Timestamp, TransferStatus, TransferType, UnknownValue,
-    Violation,
+    LongInterval, MarginCallStatus, Market, OrderId, OrderMsgType, OrderPrice, OrderSize,
+    OrderStatus, OrderType, PositionId, PositionMsgType, Price, Primitive, SettleFilter,
+    SettleType, Side, Size, SummaryMsgType, Symbol, TimeInForce, Timestamp, TransferStatus,
+    TransferType, UnknownValue, Violation,
 };
 pub use endpoint::{Endpoints, RestBase, WsBase};
 pub use error::{Error, Result};

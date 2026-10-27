@@ -249,7 +249,7 @@ impl<C: FeedChannel> Session<C> {
     }
 
     /// `PUT ws-auth`. On success `extend_at`/`expires_at` move to sent-time
-    /// + 45/60 minutes. On failure the lease is kept and retried in one
+    /// plus 45/60 minutes. On failure the lease is kept and retried in one
     /// minute until `expires_at`; after that the next dial acquires a new
     /// token. Idempotent: a cancelled extend just runs again.
     async fn extend_token(&mut self) -> Result<()> {

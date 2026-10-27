@@ -1,20 +1,20 @@
-//! Domain primitives.
+//! ドメインプリミティブ。
 //!
-//! Every value with domain meaning is its own immutable type. Each one
-//! validates on construction, in this fixed order, so a huge input is
-//! rejected before any parsing work happens:
+//! ドメイン上の意味を持つ値はすべて、それ自身の不変 (immutable) な型として
+//! 定義する。各型は構築時に次の固定順序で検証するため、巨大な入力は
+//! 構文解析の前に弾かれる。
 //!
-//! 1. size (byte length against the type's `MAX_LEN`),
-//! 2. lexical content (allowed byte set),
-//! 3. syntax (structure, for example `-?digits(.digits)?`),
-//! 4. semantics (for example "not negative", "at most 30 minutes").
+//! 1. サイズ (バイト長を型の `MAX_LEN` と比べる)
+//! 2. 字句 (許されるバイト集合)
+//! 3. 構文 (構造。たとえば `-?digits(.digits)?`)
+//! 4. 意味 (たとえば「負でない」「30 分以内」)
 //!
-//! [`InvalidValue`] reports which step failed and for which primitive. It
-//! never carries the rejected input, because some inputs are secrets.
+//! [`InvalidValue`] は、どのプリミティブがどの段階で失敗したかだけを報告する。
+//! 秘密情報も同じ経路を通るため、拒否した入力そのものは決して保持しない。
 //!
-//! The same constructors back `Deserialize`, so a value decoded from the
-//! exchange passed exactly the checks a caller-built value passed. Inside the
-//! crate these types are trusted and never re-validated.
+//! `Deserialize` も同じコンストラクタを呼ぶので、取引所から受け取った値は
+//! 呼び出し側が組み立てた値と同じ検査を通過している。クレート内部では
+//! これらの型を信頼し、再検証しない。
 
 mod enums;
 mod id;
@@ -29,14 +29,14 @@ pub use enums::{
     UnknownValue,
 };
 pub use id::{Batch, ClientOrderId, ExecutionId, OrderId, PositionId};
-pub use number::{Amount, Decimal, Price, Size};
+pub use number::{Amount, Decimal, OrderPrice, OrderSize, Price, Size};
 pub use symbol::{Market, Symbol};
 pub use time::{
     BusinessDate, BusinessDateRange, HistoryWindow, IntradayInterval, KlineSpan, LongInterval,
     Timestamp,
 };
 
-/// Which domain primitive rejected a value.
+/// 値を拒否したドメインプリミティブ。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Primitive {
@@ -44,6 +44,8 @@ pub enum Primitive {
     Price,
     Size,
     Amount,
+    OrderPrice,
+    OrderSize,
     Symbol,
     OrderId,
     ExecutionId,
@@ -63,28 +65,29 @@ pub enum Primitive {
     PageRequest,
 }
 
-/// The validation step that failed. Ordered the way the checks run.
+/// 失敗した検証段階。検査が走る順に並んでいる。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Violation {
-    /// Step 1. Longer than `max` bytes, or shorter than `min`.
+    /// 段階 1。`max` バイトより長いか、`min` バイトより短い。
     Size {
         min: usize,
         max: usize,
         actual: usize,
     },
-    /// Step 2. A byte outside the allowed set, at this byte offset.
+    /// 段階 2。許されない バイトがこのバイトオフセットにある。
     Lexical { offset: usize },
-    /// Step 3. Bytes are allowed but the structure is wrong.
+    /// 段階 3。バイトは許されるが構造が違う。
     Syntax(&'static str),
-    /// Step 4. Well formed but outside the domain (for example negative).
+    /// 段階 4。形は正しいがドメインの外にある (たとえば負の値)。
     Semantics(&'static str),
 }
 
-/// A value failed a domain primitive's validation.
+/// ドメインプリミティブの検証に失敗した。
 ///
-/// Invariant: never contains the rejected input (secrets pass through the
-/// same path), only the primitive and the failed step.
+/// # 不変条件
+/// 拒否した入力を決して保持しない (秘密情報も同じ経路を通る)。保持するのは
+/// プリミティブ名と失敗した段階だけである。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct InvalidValue {
     pub primitive: Primitive,
@@ -93,17 +96,27 @@ pub struct InvalidValue {
 
 impl core::fmt::Display for InvalidValue {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "invalid {:?}: {:?}", self.primitive, self.violation)
+        write!(f, "{:?} の値が不正です: ", self.primitive)?;
+        match self.violation {
+            Violation::Size { min, max, actual } => {
+                write!(f, "長さ {actual} バイトは {min}..={max} の範囲外です")
+            }
+            Violation::Lexical { offset } => {
+                write!(f, "オフセット {offset} に許されない文字があります")
+            }
+            Violation::Syntax(why) => write!(f, "構文が不正です ({why})"),
+            Violation::Semantics(why) => write!(f, "意味上の制約に反しています ({why})"),
+        }
     }
 }
 
 impl std::error::Error for InvalidValue {}
 
-/// Shared first two validation steps. Every text primitive calls this before
-/// its own syntax and semantic checks, so the order cannot drift per type.
+/// 共通の最初の 2 段階。テキストを受け取る各プリミティブは、自身の構文・
+/// 意味検査の前に必ずこれを呼ぶ。順序が型ごとにずれることはない。
 ///
-/// # Postconditions
-/// On `Ok`, `input.len()` is in `min..=max` and every byte satisfies `allowed`.
+/// # 事後条件
+/// `Ok` なら `input.len()` は `min..=max` にあり、すべてのバイトが `allowed` を満たす。
 pub(crate) fn check_size_and_lexical(
     primitive: Primitive,
     input: &str,
@@ -127,10 +140,10 @@ pub(crate) fn check_size_and_lexical(
     }
 }
 
-/// The one `Deserialize` path for text primitives: accept a JSON string
-/// (borrowed or escaped) and run the primitive's own constructor on it.
-/// Any other JSON type is rejected, never coerced (fail closed). The serde
-/// error names the primitive and the failed step, never the value.
+/// テキスト系プリミティブに共通の `Deserialize` 経路。JSON 文字列 (借用でも
+/// エスケープ済みでも) を受け取り、そのプリミティブ自身のコンストラクタを
+/// 走らせる。他の JSON 型は強制変換せず拒否する (フェイルクローズド)。
+/// serde のエラーにはプリミティブ名と失敗段階だけが入り、値は入らない。
 pub(crate) fn deserialize_text<'de, D, T>(
     d: D,
     parse: fn(&str) -> Result<T, InvalidValue>,
@@ -149,4 +162,60 @@ where
         }
     }
     d.deserialize_str(Text(parse))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn size_is_checked_before_lexical_content() {
+        let err = check_size_and_lexical(Primitive::Symbol, "", 1, 3, |b| b.is_ascii_uppercase())
+            .unwrap_err();
+        assert_eq!(
+            err.violation,
+            Violation::Size {
+                min: 1,
+                max: 3,
+                actual: 0
+            }
+        );
+
+        let err =
+            check_size_and_lexical(Primitive::Symbol, "abcd", 1, 3, |b| b.is_ascii_uppercase())
+                .unwrap_err();
+        assert_eq!(
+            err.violation,
+            Violation::Size {
+                min: 1,
+                max: 3,
+                actual: 4
+            },
+            "too long wins over bad bytes"
+        );
+
+        let err =
+            check_size_and_lexical(Primitive::Symbol, "ABc", 1, 3, |b| b.is_ascii_uppercase())
+                .unwrap_err();
+        assert_eq!(err.violation, Violation::Lexical { offset: 2 });
+        assert_eq!(err.primitive, Primitive::Symbol);
+    }
+
+    #[test]
+    fn a_json_number_is_not_coerced_into_a_text_primitive() {
+        let err = serde_json::from_str::<Symbol>("123").unwrap_err();
+        assert!(!err.to_string().is_empty());
+        assert!(serde_json::from_str::<Symbol>("\"BTC\"").is_ok());
+    }
+
+    #[test]
+    fn display_is_japanese_and_names_no_input() {
+        let err = InvalidValue {
+            primitive: Primitive::ApiSecret,
+            violation: Violation::Lexical { offset: 3 },
+        };
+        let text = err.to_string();
+        assert!(text.contains("ApiSecret"));
+        assert!(text.contains("オフセット 3"));
+    }
 }

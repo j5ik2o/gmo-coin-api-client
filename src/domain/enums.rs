@@ -1,19 +1,19 @@
-//! Enumerated wire values.
+//! 列挙型のワイヤ値。
 //!
-//! Two kinds, chosen by one rule:
+//! 2 種類あり、1 つの規則で選ぶ。
 //!
-//! - **Open** (`open_enum!`): values the exchange sends and has grown before
-//!   (`cancelType` gained `CLOSED_ORDER`, `SOK_TAKER`, `PRICE_LIMIT`;
-//!   `settleType` gained `LOSS_CUT` in order events). An unrecognized value
-//!   decodes to `Unknown(UnknownValue)`, which keeps the exact text. That is
-//!   a faithful representation of what arrived, not a default: the caller
-//!   sees it and decides. It still passes size and lexical checks, so garbage
-//!   fails closed.
-//! - **Closed** (`closed_enum!`): values this crate sends, and `Side`, which
-//!   is binary by definition. An unrecognized value is a decode error.
+//! - **開いた列挙** (`open_enum!`): 取引所が送る値で、過去に増えたことがある
+//!   もの (`cancelType` に `CLOSED_ORDER`、`SOK_TAKER`、`PRICE_LIMIT` が増え、
+//!   注文イベントの `settleType` に `LOSS_CUT` が増えた)。未知の値は
+//!   `Unknown(UnknownValue)` にデコードされ、元の文字列をそのまま保持する。
+//!   これは届いた値の忠実な表現であり、既定値ではない。呼び出し側がそれを
+//!   見て判断する。サイズと字句の検査は通るので、ごみはフェイルクローズドで
+//!   弾かれる。
+//! - **閉じた列挙** (`closed_enum!`): このクレートが送る値と、定義上二値の
+//!   `Side`。未知の値はデコードエラーになる。
 //!
-//! The wire string for each variant is written once, in the macro call, and
-//! both directions derive from it.
+//! 各 variant のワイヤ文字列はマクロ呼び出しに一度だけ書き、双方向とも
+//! そこから導かれる。
 
 use core::fmt;
 
@@ -21,12 +21,12 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::{InvalidValue, Primitive, check_size_and_lexical, deserialize_text};
 
-/// The exact text of an enum value this crate version does not know.
+/// このクレートのバージョンが知らない列挙値の、元のままの文字列。
 ///
-/// # Invariants
-/// 1 to 64 bytes of `A-Z 0-9 _`, and never equal to a known variant of the
-/// enum that holds it. The constructor is private, so a caller cannot build
-/// `OrderStatus::Unknown("ORDERED")` and alias a known variant.
+/// # 不変条件
+/// 1 から 64 バイトの `A-Z 0-9 _` で、それを保持する列挙の既知の variant と
+/// 決して等しくない。コンストラクタが非公開なので、呼び出し側は
+/// `OrderStatus::Unknown("ORDERED")` を作って既知の variant を偽装できない。
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct UnknownValue(Box<str>);
 
@@ -58,7 +58,7 @@ macro_rules! open_enum {
         #[non_exhaustive]
         pub enum $name {
             $($(#[$vdoc])* $variant,)+
-            /// A value added by the exchange after this crate version.
+            /// このクレートのバージョンより後に取引所が追加した値。
             Unknown(UnknownValue),
         }
 
@@ -139,47 +139,47 @@ macro_rules! closed_enum {
 }
 
 closed_enum!(
-    /// `side`.
+    /// `side`。
     Side { Buy = "BUY", Sell = "SELL" }
 );
 
 closed_enum!(
-    /// `timeInForce` for a LIMIT order. The docs allow `timeInForce` only on
-    /// LIMIT; MARKET and STOP always execute FAK, so they carry no field.
+    /// LIMIT 注文の `timeInForce`。ドキュメントは `timeInForce` を LIMIT に
+    /// のみ許す。MARKET と STOP は常に FAK で執行されるので、フィールドを持たない。
     LimitTimeInForce {
-        /// Fill and store: the unfilled rest stays on the book. Exchange default.
+        /// Fill and Store: 未約定分は板に残る。取引所の既定。
         Fas = "FAS",
-        /// Fill and kill: the unfilled rest expires.
+        /// Fill and Kill: 未約定分は失効する。
         Fak = "FAK",
-        /// Fill or kill: all at once or nothing.
+        /// Fill or Kill: 全量約定か、さもなければ失効。
         Fok = "FOK",
-        /// Post-only (`SOK`): expires instead of taking liquidity.
+        /// Post-only (`SOK`): 流動性を取る代わりに失効する。
         PostOnly = "SOK",
     }
 );
 
 closed_enum!(
-    /// `settleType` filter for `cancelBulkOrder`.
+    /// `cancelBulkOrder` の `settleType` フィルタ。
     SettleFilter { Open = "OPEN", Close = "CLOSE" }
 );
 
 closed_enum!(
-    /// `transferType` for `POST /account/transfer`.
+    /// `POST /account/transfer` の `transferType`。
     TransferType {
-        /// From the crypto account to the FX account.
+        /// 暗号資産口座から FX 口座へ。
         Withdrawal = "WITHDRAWAL",
-        /// From the FX account to the crypto account.
+        /// FX 口座から暗号資産口座へ。
         Deposit = "DEPOSIT",
     }
 );
 
 open_enum!(
-    /// `GET /status`.
+    /// `GET /status`。
     ExchangeStatus { Maintenance = "MAINTENANCE", PreOpen = "PREOPEN", Open = "OPEN" }
 );
 
 open_enum!(
-    /// `status` of an order, `orderStatus` of an order event.
+    /// 注文の `status`、注文イベントの `orderStatus`。
     OrderStatus {
         Waiting = "WAITING",
         Ordered = "ORDERED",
@@ -192,7 +192,7 @@ open_enum!(
 );
 
 open_enum!(
-    /// `cancelType`.
+    /// `cancelType`。
     CancelType {
         User = "USER",
         PositionLosscut = "POSITION_LOSSCUT",
@@ -213,42 +213,42 @@ open_enum!(
 );
 
 open_enum!(
-    /// `orderType`.
+    /// `orderType`。
     OrderType { Normal = "NORMAL", Losscut = "LOSSCUT" }
 );
 
 open_enum!(
-    /// `executionType` as reported back.
+    /// 応答側の `executionType`。
     ExecutionType { Market = "MARKET", Limit = "LIMIT", Stop = "STOP" }
 );
 
 open_enum!(
-    /// `settleType` as reported back.
+    /// 応答側の `settleType`。
     SettleType { Open = "OPEN", Close = "CLOSE", LossCut = "LOSS_CUT" }
 );
 
 open_enum!(
-    /// `timeInForce` as reported back.
+    /// 応答側の `timeInForce`。
     TimeInForce { Fak = "FAK", Fas = "FAS", Fok = "FOK", Sok = "SOK" }
 );
 
 open_enum!(
-    /// `marginCallStatus`.
+    /// `marginCallStatus`。
     MarginCallStatus { Normal = "NORMAL", MarginCall = "MARGIN_CALL", Losscut = "LOSSCUT" }
 );
 
 open_enum!(
-    /// `cryptoShortfallStatus`.
+    /// `cryptoShortfallStatus`。
     CryptoShortfallStatus { Normal = "NORMAL", Shortfall = "SHORTFALL", Liquidation = "LIQUIDATION" }
 );
 
 open_enum!(
-    /// `status` of a deposit, withdrawal, or transfer record.
+    /// 入金・出金・振替レコードの `status`。
     TransferStatus { Executed = "EXECUTED" }
 );
 
 open_enum!(
-    /// `feeType` in the exchange-fee history.
+    /// 取引所手数料履歴の `feeType`。
     FeeType {
         LeverageFee = "LEVERAGE_FEE",
         SpotFeeRefund = "SPOT_FEE_REFUND",
@@ -257,21 +257,58 @@ open_enum!(
 );
 
 open_enum!(
-    /// `msgType` of `orderEvents`.
+    /// `orderEvents` の `msgType`。
     OrderMsgType { New = "NOR", Replaced = "ROR", Canceled = "COR", Executed = "ER" }
 );
 
 open_enum!(
-    /// `msgType` of `executionEvents`.
+    /// `executionEvents` の `msgType`。
     ExecutionMsgType { Executed = "ER" }
 );
 
 open_enum!(
-    /// `msgType` of `positionEvents`.
+    /// `positionEvents` の `msgType`。
     PositionMsgType { Opened = "OPR", Updated = "UPR", LosscutUpdated = "ULR", Closed = "CPR" }
 );
 
 open_enum!(
-    /// `msgType` of `positionSummaryEvents`.
+    /// `positionSummaryEvents` の `msgType`。
     SummaryMsgType { Init = "INIT", Update = "UPDATE", Periodic = "PERIODIC" }
 );
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::Violation;
+
+    #[test]
+    fn open_enums_keep_unknown_values_and_reject_garbage() {
+        let known: CancelType = serde_json::from_str("\"PRICE_LIMIT\"").unwrap();
+        assert_eq!(known, CancelType::PriceLimit);
+        let unknown: CancelType = serde_json::from_str("\"NEW_REASON_7\"").unwrap();
+        assert!(matches!(&unknown, CancelType::Unknown(v) if v.as_str() == "NEW_REASON_7"));
+        assert_eq!(unknown.to_string(), "NEW_REASON_7");
+        assert!(serde_json::from_str::<CancelType>("\"lower case\"").is_err());
+        assert!(serde_json::from_str::<CancelType>("\"\"").is_err());
+        assert!(serde_json::from_str::<CancelType>(&format!("\"{}\"", "A".repeat(65))).is_err());
+        assert!(serde_json::from_str::<CancelType>("5").is_err());
+    }
+
+    #[test]
+    fn closed_enums_reject_unknown_values() {
+        assert_eq!(serde_json::from_str::<Side>("\"BUY\"").unwrap(), Side::Buy);
+        assert!(serde_json::from_str::<Side>("\"HOLD\"").is_err());
+        assert_eq!(
+            serde_json::to_string(&LimitTimeInForce::PostOnly).unwrap(),
+            "\"SOK\""
+        );
+        assert_eq!(TransferType::Deposit.as_str(), "DEPOSIT");
+    }
+
+    #[test]
+    fn unknown_value_validation_order() {
+        let v = |t: &str| UnknownValue::parse(t).unwrap_err().violation;
+        assert!(matches!(v(&"A".repeat(65)), Violation::Size { .. }));
+        assert_eq!(v("A-B"), Violation::Lexical { offset: 1 });
+    }
+}
