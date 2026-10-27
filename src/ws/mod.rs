@@ -18,7 +18,9 @@
 //! このモジュールを隠す cargo feature はない。フレーミングは tokio-tungstenite
 //! にあり、REST が既に使うクレート以外を必要としない。
 
+mod codec;
 mod events;
+mod lease;
 mod session;
 
 pub use events::{
@@ -38,7 +40,7 @@ use crate::rest::Ticker;
 /// [`PrivateChannel`]。封印されている: スーパートレイトは非公開モジュールに
 /// あるので、他の型は実装できず、そのメソッドはクレートの外から呼べない。
 /// `Feed::<C>::next` は `C::Event` ([`PublicEvent`] または [`PrivateEvent`]) を返す。
-pub trait FeedChannel: session::codec::Codec + Clone + Send + 'static {}
+pub trait FeedChannel: codec::Codec + Clone + Send + 'static {}
 
 /// Public チャネル。置き換えのキーは (チャネル, 銘柄) である。ドキュメントに
 /// よれば同じ銘柄への後の subscribe が先のものを置き換えるので、
@@ -392,7 +394,7 @@ impl Client<Authenticated> {
                 violation: Violation::Semantics("extend after expiry"),
             });
         }
-        let schedule = session::LeaseSchedule {
+        let schedule = lease::LeaseSchedule {
             extend_after,
             retry_after,
             expires_after,
