@@ -1,8 +1,9 @@
 //! モックに対する WebSocket フィード: デコード、購読を再生する再接続、
 //! ペーシング、Private トークンのライフサイクル。
 //!
-//! フィードの本体はフェーズ 3 で実装される。それまで各テストは
-//! `#[ignore = "phase 3: ..."]` で保留する。
+//! ペーシング (1 秒に 1 コマンド) を検証するのは
+//! `subscribe_commands_are_paced_one_per_second` だけで、他のテストは
+//! `unpaced_ws_commands_for_loopback` で待ち時間を省く。
 
 mod support;
 
@@ -15,11 +16,12 @@ use support::{Api, MockExchange, fixture};
 const WAIT: Duration = Duration::from_secs(5);
 
 #[tokio::test]
-#[ignore = "phase 3: Feed::next reconnects and replays subscriptions"]
 async fn public_feed_replays_subscriptions_after_a_drop() {
     let mock = MockExchange::start().await;
     let ws = mock.ws();
-    let mut feed = mock.client().public_feed();
+    let client = mock.client();
+    client.unpaced_ws_commands_for_loopback().unwrap();
+    let mut feed = client.public_feed();
     feed.subscribe(PublicChannel::Ticker(Symbol::BTC)).unwrap();
     feed.subscribe(PublicChannel::Ticker(Symbol::BTC)).unwrap();
 
@@ -63,7 +65,6 @@ async fn public_feed_replays_subscriptions_after_a_drop() {
 }
 
 #[tokio::test]
-#[ignore = "phase 3: Pacer::claim and the subscribe diff"]
 async fn subscribe_commands_are_paced_one_per_second() {
     let mock = MockExchange::start().await;
     let ws = mock.ws();
@@ -90,11 +91,11 @@ async fn subscribe_commands_are_paced_one_per_second() {
 }
 
 #[tokio::test]
-#[ignore = "phase 3: the private feed owns the token lifecycle"]
 async fn private_feed_reuses_its_token_across_a_reconnect_and_deletes_it_on_close() {
     let mock = MockExchange::start().await;
     let ws = mock.ws();
     let client = mock.client().authenticate(MockExchange::credentials());
+    client.unpaced_ws_commands_for_loopback().unwrap();
     let mut feed = client.private_feed();
     feed.subscribe(PrivateChannel::ExecutionEvents).unwrap();
 
