@@ -1,20 +1,19 @@
-//! WebSocket feeds.
+//! WebSocket フィード。
 //!
-//! A [`Feed`] is one logical subscription stream that survives disconnects.
-//! It is caller-driven: no background task, no channel. All I/O (connect,
-//! handshake, subscribe commands, pongs, token extension, reconnect) happens
-//! inside [`Feed::next`], so backpressure is the socket's own and there is
-//! no hidden buffer to bound.
+//! [`Feed`] は、切断をまたいで生き続ける 1 本の論理的な購読ストリームである。
+//! 呼び出し側が駆動する。バックグラウンドタスクもチャネルもない。
+//! すべての I/O (接続、ハンドシェイク、subscribe コマンド、pong、トークン延長、
+//! 再接続) は [`Feed::next`] の中で起きる。したがってバックプレッシャは
+//! ソケット自身のもので、上限を決めるべき隠れたバッファは存在しない。
 //!
-//! Subscriptions are desired state, not commands. `subscribe` and
-//! `unsubscribe` edit a set and return at once. `next` reconciles the set
-//! with what the current connection has been sent, one command per pacer
-//! slot. After a reconnect the "sent" side is empty, so the same
-//! reconciliation replays every subscription. Subscribing twice is a no-op;
-//! a reconnect never double-subscribes.
+//! 購読はコマンドではなく「望ましい状態」である。`subscribe` と `unsubscribe` は
+//! 集合を編集してすぐ戻る。`next` はその集合と、現在の接続に送った内容との
+//! 差分を、ペーサのスロット 1 つにつきコマンド 1 つずつ埋める。再接続の後は
+//! 「送った」側が空になるので、同じ差分計算がすべての購読を再生する。
+//! 二度 subscribe しても何も起きず、再接続が二重に subscribe することもない。
 //!
-//! No cargo feature gates this module: the framing is in `wire::ws_frame`
-//! and needs no crate beyond what REST already uses.
+//! このモジュールを隠す cargo feature はない。フレーミングは tokio-tungstenite
+//! にあり、REST が既に使うクレート以外を必要としない。
 
 mod events;
 mod session;
@@ -27,38 +26,38 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::client::{Access, Authenticated, Client};
-use crate::domain::Symbol;
+use crate::domain::{InvalidValue, Primitive, Symbol, Violation};
+use crate::endpoint::Transport;
 use crate::error::{ContractViolation, Result, TransportError};
 use crate::rest::Ticker;
 
-/// A channel on the public or private WebSocket API: [`PublicChannel`] or
-/// [`PrivateChannel`]. Sealed: the supertrait lives in a private module, so
-/// no other type can implement it and its methods are not callable outside
-/// the crate. `Feed::<C>::next` yields `C::Event` ([`PublicEvent`] or
-/// [`PrivateEvent`]).
+/// Public または Private WebSocket API のチャネル: [`PublicChannel`] か
+/// [`PrivateChannel`]。封印されている: スーパートレイトは非公開モジュールに
+/// あるので、他の型は実装できず、そのメソッドはクレートの外から呼べない。
+/// `Feed::<C>::next` は `C::Event` ([`PublicEvent`] または [`PrivateEvent`]) を返す。
 pub trait FeedChannel: session::codec::Codec + Clone + Send + 'static {}
 
-/// Public channels. The key for replacement is (channel, symbol): the docs
-/// say a later subscribe for the same symbol replaces the earlier one, so
-/// `Trades { taker_only: true }` replaces `Trades { taker_only: false }`.
+/// Public チャネル。置き換えのキーは (チャネル, 銘柄) である。ドキュメントに
+/// よれば同じ銘柄への後の subscribe が先のものを置き換えるので、
+/// `Trades { taker_only: true }` は `Trades { taker_only: false }` を置き換える。
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum PublicChannel {
     Ticker(Symbol),
     OrderBooks(Symbol),
-    /// `taker_only` sends `option: "TAKER_ONLY"`.
+    /// `taker_only` は `option: "TAKER_ONLY"` を送る。
     Trades {
         symbol: Symbol,
         taker_only: bool,
     },
 }
 
-/// Private channels. One of each per connection.
+/// Private チャネル。接続ごとに各 1 つ。
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum PrivateChannel {
     ExecutionEvents,
     OrderEvents,
     PositionEvents,
-    /// `periodic` sends `option: "PERIODIC"` (a summary every 5 seconds).
+    /// `periodic` は `option: "PERIODIC"` を送る (5 秒ごとのサマリー)。
     PositionSummaryEvents {
         periodic: bool,
     },
@@ -67,23 +66,25 @@ pub enum PrivateChannel {
 impl FeedChannel for PublicChannel {}
 impl FeedChannel for PrivateChannel {}
 
+/// Public フィードのイベント。
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum PublicEvent {
     Ticker(Ticker),
     OrderBook(OrderBookUpdate),
     Trade(TradeEvent),
-    /// The connection dropped; nothing arrives until `Reconnected`. Data
-    /// derived from the stream (a local book) is stale from here.
+    /// 接続が落ちた。`Reconnected` まで何も届かない。ストリームから導いた
+    /// データ (ローカルの板) はここから先は古い。
     Disconnected(Disconnect),
-    /// A new connection is up and the subscriptions are being replayed.
-    /// Messages sent while disconnected are lost: resynchronize via REST.
+    /// 新しい接続が上がり、購読が再生されつつある。切断中に送られた
+    /// メッセージは失われている: REST で同期し直すこと。
     Reconnected,
-    /// The server rejected a command, with its text as sent (for example a
-    /// subscribe over the per-IP limit from another process).
+    /// サーバがコマンドを拒否した。本文はサーバが送ったままの文章
+    /// (たとえば別プロセスからの subscribe で IP ごとの上限を超えた場合)。
     Rejected(Box<str>),
 }
 
+/// Private フィードのイベント。
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum PrivateEvent {
@@ -91,14 +92,14 @@ pub enum PrivateEvent {
     Order(OrderEvent),
     Position(PositionEvent),
     PositionSummary(PositionSummaryEvent),
-    /// As for public. Fills during the gap are not replayed: call
-    /// `latest_executions` and `active_orders` after `Reconnected`.
+    /// Public と同じ。切断中の約定は再生されない: `Reconnected` の後に
+    /// `latest_executions` と `active_orders` を呼ぶこと。
     Disconnected(Disconnect),
     Reconnected,
     Rejected(Box<str>),
 }
 
-/// Why the connection dropped and when the next attempt starts.
+/// 接続が落ちた理由と、次の試行がいつ始まるか。
 #[derive(Debug)]
 pub struct Disconnect {
     pub reason: DisconnectReason,
@@ -108,131 +109,197 @@ pub struct Disconnect {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum DisconnectReason {
-    /// Network, TLS, framing, or a timeout (including `ws_idle`).
+    /// ネットワーク、TLS、フレーミング、またはタイムアウト (`ws_idle` を含む)。
     Transport(TransportError),
-    /// The server sent a close frame.
+    /// サーバが close フレームを送った。
     ServerClosed { code: Option<u16> },
-    /// HTTP 503 at the handshake: the documented maintenance answer.
+    /// ハンドシェイクで HTTP 503: 文書化されたメンテナンスの答え。
     Maintenance,
+    /// ハンドシェイクが 101 でも 503 でもない HTTP 状態で拒否された。Private
+    /// フィードでは 401、403、404 をトークンの失効とみなし、次の試行で
+    /// トークンを取り直す。
+    HandshakeRejected { http_status: u16 },
 }
 
-/// One subscription stream. Built lazily: no I/O until the first `next`.
+/// 1 本の購読ストリーム。遅延して構築される: 最初の `next` まで I/O はない。
 ///
-/// # Usage contract
-/// - Poll `next` at least every two minutes. Pongs are sent from inside
-///   `next`; the server drops a connection after three unanswered pings
-///   (one per minute). A feed that is not polled reconnects when it is.
-/// - `next` is cancel-safe. All progress (a half-written frame, a dial in
-///   flight, the subscription diff) lives in `self`, so using `next` in a
-///   `tokio::select!` loses nothing.
-/// - Call `close` to end the feed. Dropping it closes the socket without the
-///   close handshake and, for a private feed, leaves the token to expire
-///   (within 60 minutes) instead of deleting it.
+/// # 使い方の契約
+/// - `next` を少なくとも 2 分に 1 回は呼ぶこと。pong は `next` の中から送られ、
+///   サーバは ping (1 分に 1 回) が 3 回続けて答えられないと接続を切る。
+///   呼ばれていないフィードは、次に呼ばれたときに再接続する。
+/// - `next` はキャンセルしても安全である。すべての進捗 (書きかけのフレーム、
+///   進行中の接続、購読の差分、取得したペーサのスロット) は `self` にあるので、
+///   `tokio::select!` の中で `next` を使っても何も失われない。
+/// - フィードを終えるには `close` を呼ぶこと。drop は close ハンドシェイクなしで
+///   ソケットを閉じ、Private フィードではトークンを削除せずに (60 分以内に)
+///   失効させる。
+///
+/// # 不変条件
+/// 望ましい購読の集合は `Limits::max_subscriptions` 件を超えない。
+/// `Disconnected` の後、`Reconnected` より前にデータイベントが届くことはない。
+///
+/// # 残存リスク
+/// Private フィードの接続先 URI にはアクセストークンが含まれる。このクレートが
+/// 組み立てる文字列はゼロ埋めされるが、tungstenite はハンドシェイクの間その
+/// 複製を自身のバッファに持ち、それはゼロ埋めされない。
+///
+/// # 例
+/// ```no_run
+/// use gmo_coin_api_client::{Client, Symbol};
+/// use gmo_coin_api_client::ws::{PublicChannel, PublicEvent};
+///
+/// # async fn run() -> gmo_coin_api_client::Result<()> {
+/// let mut feed = Client::production().public_feed();
+/// feed.subscribe(PublicChannel::Ticker(Symbol::BTC))?;
+/// loop {
+///     match feed.next().await? {
+///         PublicEvent::Ticker(t) => println!("{} last {}", t.symbol, t.last),
+///         PublicEvent::Disconnected(d) => println!("切断: {:?}、{:?} 後に再接続", d.reason, d.retry_in),
+///         other => println!("{other:?}"),
+///     }
+/// }
+/// # }
+/// ```
 pub struct Feed<C: FeedChannel> {
     session: session::Session<C>,
 }
 
 impl<C: FeedChannel> Feed<C> {
-    /// Adds `channel` to the desired set, replacing one with the same key.
+    /// `channel` を望ましい集合に加える。同じキーのものがあれば置き換える。
     ///
-    /// # Preconditions
-    /// None beyond `C`'s own invariants.
+    /// # 事前条件
+    /// `C` 自身の不変条件以外にはない。
     ///
-    /// # Postconditions
-    /// The next `next` call that has a pacer slot sends the subscribe.
+    /// # 事後条件
+    /// ペーサのスロットを得た次の `next` 呼び出しが subscribe を送る。
     ///
-    /// # Errors
-    /// `Contract(TooManySubscriptions)` when the set already holds
-    /// `Limits::max_subscriptions` keys.
+    /// # エラー
+    /// 集合が既に `Limits::max_subscriptions` 件のキーを持つとき
+    /// `TooManySubscriptions`。
     pub fn subscribe(&mut self, channel: C) -> Result<(), ContractViolation> {
         self.session.desire(channel)
     }
 
-    /// Removes the channel with `channel`'s key. Returns whether it was there.
+    /// `channel` のキーを持つチャネルを取り除く。あったかどうかを返す。
     ///
-    /// # Preconditions
-    /// None.
+    /// # 事前条件
+    /// なし。
     ///
-    /// # Postconditions
-    /// Returns whether the key was desired. If the current connection had been told, a later `next` sends the unsubscribe at the next pacer slot.
+    /// # 事後条件
+    /// そのキーが望まれていたかどうかを返す。現在の接続に伝えてあったなら、
+    /// 後の `next` が次のペーサのスロットで unsubscribe を送る。
     ///
-    /// # Errors
-    /// Infallible.
+    /// # エラー
+    /// 失敗しない。
     pub fn unsubscribe(&mut self, channel: &C) -> bool {
         self.session.undesire(channel)
     }
 
-    /// The next event.
+    /// 次のイベント。
     ///
-    /// # Preconditions
-    /// The usage contract on [`Feed`]: poll at least every two minutes.
+    /// # 事前条件
+    /// [`Feed`] の使い方の契約: 少なくとも 2 分に 1 回呼ぶこと。
     ///
-    /// # Postconditions
-    /// - Data events arrive only for channels in the desired set at the time
-    ///   they were sent.
-    /// - Every `Disconnected` is followed by `Reconnected` before any data
-    ///   event, unless `next` returns `Err`.
+    /// # 事後条件
+    /// - データイベントは、それが届いた時点で望ましい集合にあるチャネルの
+    ///   ものだけが返る。
+    /// - `next` が `Err` を返さない限り、どの `Disconnected` にも、次のデータ
+    ///   イベントより前に `Reconnected` が続く。
     ///
-    /// # Errors
-    /// Terminal; the feed is closed afterwards and further calls return
-    /// `FeedClosed`:
-    /// - `Api` from `ws-auth` (for example ERR-5012, a rejected key).
-    /// - `Protocol(WsMessage)` when a message on a subscribed channel does
-    ///   not decode. Fails closed: the model no longer matches the exchange.
+    /// # エラー
+    /// 終端的である。以後フィードは閉じており、さらに呼ぶと `FeedClosed` を返す:
+    /// - `ws-auth` からの `Api` (たとえば ERR-5012、拒否されたキー)。
+    ///   メンテナンス (ERR-5201、5202、5203) は例外で、`Disconnected` になる。
+    /// - 購読中のチャネルのメッセージがデコードできないときの
+    ///   `Protocol(WsMessage)`。フェイルクローズド: モデルがもはや取引所と
+    ///   一致していない。
+    /// - `ws-auth` の答えが形を破ったときの、それ以外の `Protocol` と `Contract`。
     ///
-    /// Network failures are not errors here. They are `Disconnected` events,
-    /// followed by reconnect with `Config::reconnect` backoff.
+    /// ネットワークの失敗はここではエラーではない。`Disconnected` イベントに
+    /// なり、`Config::reconnect` のバックオフで再接続する。
     pub async fn next(&mut self) -> Result<C::Event> {
         self.session.next().await
     }
 
-    /// Sends the close handshake (bounded by `ws_write`) and, for a private
-    /// feed, deletes the token. Idempotent in effect: a token already gone
-    /// is not an error.
+    /// close ハンドシェイク (`ws_write` で有界) を送り、Private フィードでは
+    /// トークンを削除する。
     ///
-    /// # Preconditions
-    /// None.
+    /// # 事前条件
+    /// なし。
     ///
-    /// # Postconditions
-    /// The socket is closed. For a private feed the token is deleted, or, if the DELETE failed, it expires on its own within 60 minutes.
+    /// # 事後条件
+    /// ソケットは閉じている。Private フィードでは、生きていると考えている
+    /// トークンに DELETE を送る。既に失効したと分かっているトークンには送らない。
+    /// DELETE が失敗したトークンは 60 分以内に自然に失効する。
     ///
-    /// # Errors
-    /// `Transport` or `Api` if the close handshake or the DELETE failed. The socket is closed either way.
+    /// # エラー
+    /// close ハンドシェイクまたは DELETE が失敗したときの `Transport` か `Api`。
+    /// 両方失敗したときは最初のもの。どちらにせよソケットは閉じている。
     pub async fn close(self) -> Result<()> {
         self.session.close().await
     }
 }
 
 impl<A: Access> Client<A> {
-    /// A feed on the public WebSocket API.
+    /// Public WebSocket API のフィード。
     ///
-    /// # Preconditions
-    /// None.
+    /// # 事前条件
+    /// なし。
     ///
-    /// # Postconditions
-    /// No I/O. The feed connects on its first `next`.
+    /// # 事後条件
+    /// I/O なし。フィードは最初の `next` で接続する。
     ///
-    /// # Errors
-    /// Infallible.
+    /// # エラー
+    /// 失敗しない。
     pub fn public_feed(&self) -> Feed<PublicChannel> {
         Feed {
             session: session::Session::public(self.inner.clone()),
         }
     }
+
+    /// テスト用: WebSocket コマンドのペーシング (1 秒に 1 回) を、このクライアント
+    /// とその複製すべてで止める。ループバックのモック取引所に対してだけ使える。
+    ///
+    /// # 事前条件
+    /// Public と Private 両方の WebSocket ベースがループバック IP リテラルへの
+    /// 平文トランスポートであること。
+    ///
+    /// # 事後条件
+    /// `Ok` なら、以後のフィードは subscribe と unsubscribe を待たずに送る。
+    /// 既に開いているフィードにも効く。
+    ///
+    /// # エラー
+    /// どちらかの WebSocket ベースがループバックでないとき
+    /// `Semantics("not loopback")`。本番の取引所に向けて止めることはできない。
+    pub fn unpaced_ws_commands_for_loopback(&self) -> Result<(), InvalidValue> {
+        let endpoints = &self.inner.endpoints;
+        let loopback = [endpoints.public_ws.base(), endpoints.private_ws.base()]
+            .iter()
+            .all(|base| matches!(base.transport, Transport::Plain(_)));
+        if !loopback {
+            return Err(InvalidValue {
+                primitive: Primitive::BaseUrl,
+                violation: Violation::Semantics("not loopback"),
+            });
+        }
+        self.inner.public_ws_pacer.unpace();
+        self.inner.private_ws_pacer.unpace();
+        Ok(())
+    }
 }
 
 impl Client<Authenticated> {
-    /// A feed on the private WebSocket API. The token is acquired on the
-    /// first `next`, extended before it expires, and deleted by `close`.
+    /// Private WebSocket API のフィード。トークンは最初の `next` で取得し、
+    /// 失効前に延長し、`close` で削除する。
     ///
-    /// # Preconditions
-    /// None.
+    /// # 事前条件
+    /// なし。
     ///
-    /// # Postconditions
-    /// No I/O. The token is acquired on the first `next`.
+    /// # 事後条件
+    /// I/O なし。トークンは最初の `next` で取得する。
     ///
-    /// # Errors
-    /// Infallible.
+    /// # エラー
+    /// 失敗しない。
     pub fn private_feed(&self) -> Feed<PrivateChannel> {
         Feed {
             session: session::Session::private(self.clone()),
@@ -240,33 +307,110 @@ impl Client<Authenticated> {
     }
 }
 
-/// The per-IP command budget: one subscribe or unsubscribe per second.
+/// IP ごとのコマンド予算: subscribe または unsubscribe は 1 秒に 1 回。
 ///
-/// Shared by every feed from one `Client` (and its clones) because the limit
-/// is per IP, not per connection. The shared state is one atomic "next free
-/// slot", claimed by compare-and-swap; there is no lock to hold across an
-/// `.await`. A slot claimed by a command that is then cancelled is wasted,
-/// which only ever makes the pace slower, never faster.
+/// 上限は接続ごとではなく IP ごとなので、1 つの `Client` (とその複製) から
+/// 作られたすべてのフィードが共有する。共有状態は「次に空くスロット」の
+/// アトミック 1 つで、compare-and-swap で取得する。`.await` をまたいで握る
+/// ロックはない。取得した後にキャンセルされたコマンドのスロットは無駄になる
+/// が、それはペースを遅くするだけで、速くすることは決してない。
+///
+/// # 不変条件
+/// `claim` が返す時刻は単調で、連続する 2 つは少なくとも `interval` 離れている。
 pub(crate) struct Pacer {
     origin: Instant,
     next_free_nanos: AtomicU64,
+    /// `INTERVAL` のナノ秒。`unpace` が 0 にする。
+    interval_nanos: AtomicU64,
 }
 
 impl Pacer {
+    /// 1 秒の上限に、タイマーの粗さとサーバ側の計時のずれの分を足したもの。
     pub(crate) const INTERVAL: Duration = Duration::from_millis(1_050);
 
     pub(crate) fn new() -> Self {
         Self {
             origin: Instant::now(),
             next_free_nanos: AtomicU64::new(0),
+            interval_nanos: AtomicU64::new(Self::INTERVAL.as_nanos() as u64),
         }
     }
 
-    /// Claims the next slot and returns when it starts.
+    /// 次のスロットを取得し、その開始時刻を返す。
+    ///
+    /// # 事後条件
+    /// 返る時刻は現在以降で、直前に取得されたスロットより `interval` 以上後。
     pub(crate) fn claim(&self) -> Instant {
-        // TODO loop { cur = load; start = max(cur, now - origin);
-        //   if cas(cur, start + INTERVAL) succeeds { return origin + start } }
-        let _ = (&self.origin, self.next_free_nanos.load(Ordering::Relaxed));
-        todo!()
+        let interval = self.interval_nanos.load(Ordering::Relaxed);
+        let now = self.origin.elapsed().as_nanos() as u64;
+        let mut current = self.next_free_nanos.load(Ordering::Relaxed);
+        loop {
+            let start = current.max(now);
+            match self.next_free_nanos.compare_exchange_weak(
+                current,
+                start + interval,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return self.origin + Duration::from_nanos(start),
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
+    fn unpace(&self) {
+        self.interval_nanos.store(0, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slots_are_spaced_by_the_interval_and_never_in_the_past() {
+        let pacer = Pacer::new();
+        let before = Instant::now();
+        let first = pacer.claim();
+        let second = pacer.claim();
+        let third = pacer.claim();
+        assert!(first >= before);
+        assert!(first <= Instant::now());
+        assert_eq!(second - first, Pacer::INTERVAL);
+        assert_eq!(third - second, Pacer::INTERVAL);
+    }
+
+    #[test]
+    fn an_unpaced_pacer_hands_out_the_present() {
+        let pacer = Pacer::new();
+        pacer.unpace();
+        let first = pacer.claim();
+        let second = pacer.claim();
+        assert!(second >= first);
+        assert!(second <= Instant::now());
+    }
+
+    #[test]
+    fn claims_from_many_threads_never_overlap() {
+        let pacer = std::sync::Arc::new(Pacer::new());
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let pacer = pacer.clone();
+                std::thread::spawn(move || (0..50).map(|_| pacer.claim()).collect::<Vec<_>>())
+            })
+            .collect();
+        let mut slots: Vec<Instant> = handles
+            .into_iter()
+            .flat_map(|h| h.join().unwrap())
+            .collect();
+        slots.sort();
+        assert!(slots.windows(2).all(|w| w[1] - w[0] >= Pacer::INTERVAL));
+    }
+
+    #[test]
+    fn unpacing_refuses_a_production_client() {
+        let client = Client::production();
+        let err = client.unpaced_ws_commands_for_loopback().unwrap_err();
+        assert_eq!(err.violation, Violation::Semantics("not loopback"));
     }
 }
