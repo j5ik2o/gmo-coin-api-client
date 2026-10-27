@@ -1145,7 +1145,7 @@ mod tests {
         let client = mock.client().authenticate(MockExchange::credentials());
         client.unpaced_ws_commands_for_loopback().unwrap();
         let schedule = LeaseSchedule {
-            extend_after: Duration::from_millis(150),
+            extend_after: Duration::from_millis(300),
             retry_after: Duration::from_millis(50),
             expires_after: Duration::from_secs(60),
         };
