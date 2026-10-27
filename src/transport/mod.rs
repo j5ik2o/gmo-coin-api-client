@@ -9,10 +9,8 @@
 //! tungstenite の型は公開シグネチャに一切現れない。
 //!
 //! # 残存リスク
-//! スケッチの設計では、署名済みリクエストのバイト列を `Zeroizing` バッファ
-//! から直接ソケットへ書いていた。hyper を使う現在の設計では、`API-KEY` と
-//! `API-SIGN` ヘッダは hyper の `HeaderMap` に、`ws-auth` の PUT/DELETE
-//! ボディ (アクセストークンを含む) は hyper の書き込みバッファに、それぞれ
+//! `API-KEY` と `API-SIGN` ヘッダは hyper の `HeaderMap` に、`ws-auth` の
+//! PUT/DELETE ボディ (アクセストークンを含む) は hyper の書き込みバッファに、それぞれ
 //! ゼロ埋めされない形で複製される。同様に、Private WebSocket の接続先 URI
 //! (トークンを含む) は tungstenite の内部バッファに残る。これらはライブラリ
 //! の所有物であり、このクレートからゼロ埋めする手段がない。クレートが所有
