@@ -1060,3 +1060,45 @@ async fn a_rejected_replacement_is_not_confirmed_by_the_old_subscription_data() 
     );
     feed.close().await.unwrap();
 }
+
+/// サーバが close フレームを送ったら、tungstenite が積んだ返答の close を
+/// 流してから接続を捨てる (RFC 6455 のエコー)。モックは受け取った close を
+/// 数える。その後は通常の再接続である。
+#[tokio::test]
+async fn a_server_close_frame_is_echoed_before_the_connection_is_dropped() {
+    let mock = MockExchange::start().await;
+    let ws = mock.ws();
+    let mut feed = fast_client(&mock, |_| {}).public_feed();
+    feed.subscribe(PublicChannel::Ticker(Symbol::BTC)).unwrap();
+
+    let driver = tokio::spawn(async move {
+        let event = feed.next().await;
+        (feed, event)
+    });
+    ws.subscribed(Api::Public, "ticker", Some("BTC"), WAIT)
+        .await;
+    ws.close_connections(Api::Public);
+    let (mut feed, event) = driver.await.unwrap();
+    match event.unwrap() {
+        PublicEvent::Disconnected(d) => assert!(
+            matches!(
+                d.reason,
+                DisconnectReason::ServerClosed { code: Some(1000) }
+            ),
+            "{:?}",
+            d.reason
+        ),
+        other => panic!("{other:?}"),
+    }
+    let deadline = Instant::now() + WAIT;
+    while ws.closes_received() == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "the mock never received the close echo"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    assert!(matches!(feed.next().await, Ok(PublicEvent::Reconnected)));
+    feed.close().await.unwrap();
+}

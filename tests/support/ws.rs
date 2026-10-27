@@ -18,6 +18,8 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
+use tokio_tungstenite::tungstenite::protocol::CloseFrame;
+use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 
 use super::State;
 
@@ -28,6 +30,9 @@ pub struct Hub {
     pub commands: Vec<(Instant, Api, u64, Value)>,
     conns: Vec<Conn>,
     pub pongs: usize,
+    /// クライアントから受け取った close フレームの数 (自発的なものも、
+    /// こちらの close への返答も)。
+    pub closes_received: usize,
     /// 完了したハンドシェイクの数 (API ごと)。
     pub handshakes: Vec<(u64, Api)>,
     next_id: u64,
@@ -49,6 +54,8 @@ struct Conn {
 enum Outgoing {
     Text(String),
     Ping,
+    /// 正常終了 (1000) の close フレームを送り、返答を待ってから閉じる。
+    Close,
     Drop,
 }
 
@@ -126,6 +133,19 @@ impl WsControl {
         for conn in self.lock().ws.conns.iter().filter(|c| c.api == api) {
             let _ = conn.tx.send(Outgoing::Drop);
         }
+    }
+
+    /// `api` の開いているすべての接続に正常終了 (1000) の close フレームを
+    /// 送る。クライアントの返答は `closes_received` に数えられる。
+    pub fn close_connections(&self, api: Api) {
+        for conn in self.lock().ws.conns.iter().filter(|c| c.api == api) {
+            let _ = conn.tx.send(Outgoing::Close);
+        }
+    }
+
+    /// クライアントから受け取った close フレームの数。
+    pub fn closes_received(&self) -> usize {
+        self.lock().ws.closes_received
     }
 
     /// ping を送り、`within` 以内に pong が返ったかを返す。
@@ -262,6 +282,7 @@ pub async fn serve(socket: TcpStream, state: Arc<Mutex<State>>) {
                 }
                 Some(Ok(Message::Pong(_))) => state.lock().unwrap_or_else(|e| e.into_inner()).ws.pongs += 1,
                 Some(Ok(Message::Close(_))) => {
+                    state.lock().unwrap_or_else(|e| e.into_inner()).ws.closes_received += 1;
                     // tungstenite は受信した close への返答を積むだけなので、
                     // 捨てる前に flush して返答を書き出す (RFC 6455 のエコー)。
                     let _ = ws.flush().await;
@@ -278,6 +299,15 @@ pub async fn serve(socket: TcpStream, state: Arc<Mutex<State>>) {
                 }
                 Some(Outgoing::Ping) => {
                     if ws.send(Message::Ping(Vec::new().into())).await.is_err() {
+                        break;
+                    }
+                }
+                Some(Outgoing::Close) => {
+                    let frame = CloseFrame {
+                        code: CloseCode::Normal,
+                        reason: "".into(),
+                    };
+                    if ws.send(Message::Close(Some(frame))).await.is_err() {
                         break;
                     }
                 }

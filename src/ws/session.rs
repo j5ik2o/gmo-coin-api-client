@@ -180,6 +180,9 @@ pub(crate) struct Connection {
     last_frame_at: Instant,
     /// 最初に `poll_flush` が `Pending` を返した時刻。`ws_write` を超えたら切る。
     flush_since: Option<Instant>,
+    /// サーバの close フレームを受けた。tungstenite が積んだ返答の close を
+    /// flush してから、この理由で捨てる。
+    closing: Option<DisconnectReason>,
 }
 
 /// `Connected` で 1 回のポーリングが観測したこと。
@@ -401,6 +404,7 @@ impl<C: FeedChannel> Session<C> {
                     connected_at: now,
                     last_frame_at: now,
                     flush_since: None,
+                    closing: None,
                 };
                 self.state = State::Connected(Box::new(connection), Sent::empty());
                 if self.attempt > 0 {
@@ -469,6 +473,11 @@ impl<C: FeedChannel> Session<C> {
             _ => &inner.public_ws_pacer,
         };
         let timeouts = inner.config.timeouts;
+        if conn.closing.is_some() {
+            let _ = tokio::time::timeout(timeouts.ws_write.get(), conn.stream.flush()).await;
+            let reason = conn.closing.take().expect("checked just above");
+            return Some(Ok(self.drop_connection(reason)));
+        }
         let now = Instant::now();
 
         let command = next_command::<C>(desired, &sent.subscribed);
@@ -523,9 +532,8 @@ impl<C: FeedChannel> Session<C> {
             )))),
             Step::Message(Message::Close(frame)) => {
                 let code = frame.map(|f| u16::from(f.code));
-                Some(Ok(
-                    self.drop_connection(DisconnectReason::ServerClosed { code })
-                ))
+                conn.closing = Some(DisconnectReason::ServerClosed { code });
+                None
             }
             Step::Message(_) => None,
             Step::Failed(kind) => Some(Ok(self.drop_connection(live_failure(C::API, kind)))),
