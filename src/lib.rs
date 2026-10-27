@@ -59,12 +59,6 @@ mod secret;
 mod transport;
 pub mod ws;
 
-#[cfg(test)]
-extern crate self as gmo_coin_api_client;
-#[cfg(test)]
-#[path = "../tests/support/mod.rs"]
-pub(crate) mod mock;
-
 #[cfg(doctest)]
 #[doc = include_str!("../README.md")]
 struct ReadmeDoctests;
