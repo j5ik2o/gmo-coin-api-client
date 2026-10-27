@@ -229,7 +229,9 @@ pub async fn serve(socket: TcpStream, state: Arc<Mutex<State>>) {
                 }
                 Some(Ok(Message::Pong(_))) => state.lock().unwrap_or_else(|e| e.into_inner()).ws.pongs += 1,
                 Some(Ok(Message::Close(_))) => {
-                    let _ = ws.close(None).await;
+                    // tungstenite は受信した close への返答を積むだけなので、
+                    // 捨てる前に flush して返答を書き出す (RFC 6455 のエコー)。
+                    let _ = ws.flush().await;
                     break;
                 }
                 Some(Ok(_)) => {}
