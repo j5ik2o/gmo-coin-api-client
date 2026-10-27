@@ -79,6 +79,9 @@ pub enum Reply {
     Json(String),
     /// 別の状態コード。たとえば HTML 本文の 404 や 503。
     Status { code: u16, body: String },
+    /// リテラルの本文を HTTP 200 と `Connection: close` で送り、接続を閉じる。
+    /// プールされた接続がサーバ側で閉じられた状況を作る。
+    JsonThenClose(String),
     /// 同じ本文を `Transfer-Encoding: chunked` で、このサイズのチャンクに分けて送る。
     Chunked { body: String, chunk: usize },
     /// リクエストを読み切ってから、答えずに閉じる (結果不明)。

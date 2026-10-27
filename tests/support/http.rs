@@ -207,6 +207,12 @@ async fn render(reply: Reply) -> Result<Response<Body>, Dropped> {
     match reply {
         Reply::Fixture(name) => Ok(json(200, fixture(name))),
         Reply::Json(body) => Ok(json(200, body)),
+        Reply::JsonThenClose(body) => Ok(Response::builder()
+            .status(200)
+            .header("content-type", "application/json")
+            .header("connection", "close")
+            .body(Full::new(Bytes::from(body)).boxed())
+            .expect("valid response")),
         Reply::Status { code, body } => Ok(Response::builder()
             .status(code)
             .body(Full::new(Bytes::from(body)).boxed())

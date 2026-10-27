@@ -300,6 +300,28 @@ async fn a_ticker_for_another_symbol_fails_the_postcondition() {
 }
 
 #[tokio::test]
+async fn a_get_survives_an_idle_connection_the_server_closed() {
+    let mock = MockExchange::start().await;
+    mock.on("GET", "/public/v1/status")
+        .times(1)
+        .reply(Reply::JsonThenClose(fixture("public_get_status.json")));
+    mock.on("GET", "/public/v1/status")
+        .times(1)
+        .fixture("public_get_status.json");
+    let client = mock.client();
+
+    assert_eq!(client.status().await.unwrap(), ExchangeStatus::Open);
+    assert_eq!(
+        client.status().await.unwrap(),
+        ExchangeStatus::Open,
+        "a fresh connection replaces the closed one"
+    );
+
+    assert_eq!(mock.requests().len(), 2);
+    mock.assert_done();
+}
+
+#[tokio::test]
 async fn a_chunked_body_decodes_like_a_fixed_length_one() {
     let mock = MockExchange::start().await;
     mock.on("GET", "/public/v1/symbols").reply(Reply::Chunked {
