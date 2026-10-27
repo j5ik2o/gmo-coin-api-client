@@ -52,7 +52,9 @@ async fn main() -> gmo_coin_api_client::Result<()> {
 
 Private API を使うには、`Client::authenticate` に認証情報を渡します。`Credentials::from_env` は環境変数 `GMO_API_KEY` と `GMO_API_SECRET` を読みます。
 
-注文には顧客注文 ID (`ClientOrderId`) が必須です。通信が途中で切れて注文が届いたか分からないとき (`Error::outcome_unknown` が真のとき) も、同じ注文をそのまま送り直せます。取引所は使用済みの顧客注文 ID を ERR-915 で拒否するので、二重には発注されません。
+注文には顧客注文 ID (`ClientOrderId`) が必須です。注文が届いたか、届いて処理されたかが分からないとき (`Error::outcome_unknown` が真のとき) は、同じ注文をそのまま送り直せます。通信が途中で切れた場合だけでなく、ゲートウェイが 502 を返した場合や、取引所の答えを読めなかった場合も含みます。取引所は使用済みの顧客注文 ID を ERR-915 で拒否するので、二重には発注されません。ERR-915 を受け取ったら、顧客注文 ID で注文を照会して元の注文 ID を得ます。
+
+この送り直しの手順は、顧客注文 ID を持つ注文系の操作 (`place_order`、`close_position`、`close_bulk`) に限ります。`transfer` (口座振替) には冪等キーがないので、結果が分からなくても送り直さず、先に `margin()` や履歴で残高を照合してください。
 
 ```rust,no_run
 use gmo_coin_api_client::error::ErrorCode;
@@ -62,7 +64,7 @@ use gmo_coin_api_client::{
     OrderSize, Side, Symbol,
 };
 
-async fn buy(client: &Client<Authenticated>) -> gmo_coin_api_client::Result<OrderId> {
+async fn buy(client: &Client<Authenticated>) -> Result<OrderId, Box<dyn std::error::Error>> {
     let order = NewOrder {
         client_order_id: ClientOrderId::generate(),
         symbol: Symbol::BTC,
@@ -81,11 +83,14 @@ async fn buy(client: &Client<Authenticated>) -> gmo_coin_api_client::Result<Orde
             // 最初の送信は届いていた。顧客注文 ID で注文を照会する。
             Err(Error::Api(api)) if api.has(ErrorCode::CLIENT_ORDER_ID_USED) => {
                 let lookup = OrderLookup::ByClientOrderIds(Batch::one(order.client_order_id.clone()));
-                Ok(client.orders(&lookup).await?[0].order_id)
+                let orders = client.orders(&lookup).await?;
+                // ERR-915 の直後でも照会が空なら、取引所の反映を待って照会し直す。
+                let order = orders.first().ok_or("ERR-915 なのに注文が照会できない")?;
+                Ok(order.order_id)
             }
-            Err(e) => Err(e),
+            Err(e) => Err(e.into()),
         },
-        Err(e) => Err(e),
+        Err(e) => Err(e.into()),
     }
 }
 ```
