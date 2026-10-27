@@ -367,7 +367,8 @@ impl fmt::Display for ProtocolError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ProtocolErrorKind {
-    /// HTTP 状態が 2xx の外で、本文がエンベロープでない (404、503)。
+    /// HTTP 状態が 2xx の外で、本文がエンベロープでない (404、503)、または
+    /// 本文が `status == 0` のエンベロープだった (2xx の外の成功は受付でない)。
     HttpStatus(u16),
     /// 本文が整数 `status` を持つ JSON オブジェクトでない。
     NotAnEnvelope,

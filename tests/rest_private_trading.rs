@@ -604,6 +604,27 @@ async fn a_gateway_error_after_a_post_leaves_the_order_outcome_unknown() {
 }
 
 #[tokio::test]
+async fn a_success_envelope_behind_a_non_2xx_status_is_not_an_accepted_order() {
+    let mock = MockExchange::start().await;
+    mock.on("POST", "/private/v1/order").reply(Reply::Status {
+        code: 502,
+        body: support::fixture("private_post_order.json"),
+    });
+
+    let err = authed(&mock)
+        .place_order(&limit_buy(Symbol::BTC))
+        .await
+        .expect_err("502 wraps a stale or cached body");
+
+    assert!(matches!(
+        &err,
+        Error::Protocol(p) if *p.kind() == ProtocolErrorKind::HttpStatus(502)
+    ));
+    assert!(err.outcome_unknown(), "{err:?}");
+    assert!(!err.accepted_but_unreadable(), "{err:?}");
+}
+
+#[tokio::test]
 async fn a_success_envelope_without_data_after_a_post_is_accepted_but_unreadable() {
     let mock = MockExchange::start().await;
     mock.on("POST", "/private/v1/closeOrder")

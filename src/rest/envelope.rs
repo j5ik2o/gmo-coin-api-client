@@ -42,8 +42,11 @@ pub(crate) struct WireMessage<'a> {
 /// 2. `status != 0`: `messages` は形式の正しいメッセージ (コードは `ERR-<n>`、
 ///    文章は 512 バイト以下) の空でない配列でなければならず、`Error::Api` に
 ///    なる。そうでなければ `Protocol(MalformedErrorEnvelope)`。
-/// 3. `status == 0`: `data` を保持する [`Answer`] (`data` は欠けていてもよい。
-///    欠けていてよいかはエンドポイントメソッドが決める)。
+/// 3. `status == 0` かつ HTTP 状態が 2xx: `data` を保持する [`Answer`] (`data` は
+///    欠けていてもよい。欠けていてよいかはエンドポイントメソッドが決める)。
+///    `status == 0` でも HTTP 状態が 2xx の外なら `Protocol(HttpStatus)`。
+///    成功の形をした本文を中継機が別の状態で返したとき、それを受付と
+///    みなさない。
 pub(crate) fn parse(
     api: ApiGroup,
     operation: &'static str,
@@ -57,13 +60,17 @@ pub(crate) fn parse(
             kind,
         })
     };
+    let success_status = (200..300).contains(&http_status);
     let wire: Wire<'_> = match serde_json::from_slice(body) {
         Ok(w) => w,
-        Err(_) if !(200..300).contains(&http_status) => {
+        Err(_) if !success_status => {
             return Err(protocol(ProtocolErrorKind::HttpStatus(http_status)));
         }
         Err(_) => return Err(protocol(ProtocolErrorKind::NotAnEnvelope)),
     };
+    if wire.status == 0 && !success_status {
+        return Err(protocol(ProtocolErrorKind::HttpStatus(http_status)));
+    }
     if wire.status != 0 {
         let messages = wire
             .messages
@@ -217,6 +224,12 @@ mod tests {
             ),
             Err(Error::Api(_))
         ));
+        assert_eq!(
+            protocol_kind(classify(502, r#"{"status":0,"data":"637000"}"#)),
+            ProtocolErrorKind::HttpStatus(502),
+            "a success envelope behind a non-2xx status is not a success"
+        );
+        assert!(classify(201, r#"{"status":0,"data":"637000"}"#).is_ok());
         match classify(
             200,
             r#"{"status":1,"messages":[{"message_code":"ERR-5106","message_string":"bad \"param\""}]}"#,
