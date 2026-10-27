@@ -720,10 +720,16 @@ impl<C: FeedChannel> Session<C> {
                 C::API,
                 TransportErrorKind::Timeout(Phase::WsIdle),
             )))),
-            Step::WriteTimedOut => Some(Ok(self.drop_connection(live_failure(
-                C::API,
-                TransportErrorKind::Timeout(Phase::WsWrite),
-            )))),
+            // タイマーは select の前の `flush_since` から組んだ。同じ select の
+            // 中で flush が完了していれば古いので、今の状態で判定し直す。
+            Step::WriteTimedOut => match conn.flush_since {
+                Some(since) if since + timeouts.ws_write.get() <= Instant::now() => Some(Ok(self
+                    .drop_connection(live_failure(
+                        C::API,
+                        TransportErrorKind::Timeout(Phase::WsWrite),
+                    )))),
+                _ => None,
+            },
             Step::ExtendDue => {
                 self.start_extend();
                 None
