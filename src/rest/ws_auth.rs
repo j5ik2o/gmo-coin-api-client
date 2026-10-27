@@ -1,15 +1,16 @@
-//! `ws-auth`: the private WebSocket token lifecycle. Crate-private.
+//! `ws-auth`: Private WebSocket トークンのライフサイクル。クレート内部。
 //!
-//! These three calls are not public. The private feed owns the token from
-//! issue to delete, so there is one way to use the private WebSocket and
-//! the token never crosses the public API (it is a bearer credential: anyone
-//! holding it reads the account's order and execution stream).
+//! この 3 つの呼び出しは公開しない。Private フィードが発行から削除まで
+//! トークンを所有するので、Private WebSocket の使い方は 1 つだけになり、
+//! トークンが公開 API を越えることはない (トークンはベアラ資格情報であり、
+//! 持っていれば誰でも口座の注文・約定ストリームを読める)。
 
 use serde::Serialize;
+use zeroize::Zeroizing;
 
 use super::{Call, endpoint};
 use crate::client::{Authenticated, Client};
-use crate::error::Result;
+use crate::error::{ProtocolErrorKind, Result};
 use crate::secret::AccessToken;
 
 #[derive(Serialize)]
@@ -17,30 +18,46 @@ struct TokenBody<'a> {
     token: &'a str,
 }
 
+/// `POST /ws-auth` にはパラメータがない。公式サンプルは空オブジェクト `{}` を
+/// 署名して送るので、ここでもそれに合わせる。
+#[derive(Serialize)]
+struct EmptyBody {}
+
 impl Client<Authenticated> {
-    /// `POST /private/v1/ws-auth`. Valid for 60 minutes.
+    /// `POST /private/v1/ws-auth`。60 分間有効。
     ///
-    /// Issuing a sixth token deletes the account's token closest to expiry,
-    /// which may belong to another process using the same key. So the feed
-    /// issues only when it holds no live token, and reuses one across
-    /// reconnects.
+    /// 6 つ目のトークンを発行すると、口座のトークンのうち有効期限が最も近い
+    /// ものが削除される。それは同じキーを使う別のプロセスのものかもしれない。
+    /// したがってフィードは、生きているトークンを持たないときだけ発行し、
+    /// 再接続をまたいで再利用する。
     ///
-    /// # Postconditions
-    /// The token passed [`AccessToken::parse`] (URL-path safe, bounded).
+    /// # 事後条件
+    /// トークンは [`AccessToken::parse`] を通過している (URL パスに安全、有界)。
+    /// 応答本文と `data` の生テキストはゼロ埋めされるバッファにだけ存在した。
+    ///
+    /// # エラー
+    /// [REST 共通の集合](crate::rest#エラー)。`data` が文字列でない、または
+    /// トークンの字句規則に反するときは `Protocol(Shape)` (serde のメッセージは
+    /// 捨てる。トークンを引用するからである)。
     pub(crate) async fn acquire_ws_token(&self) -> Result<AccessToken> {
-        let answer = self
-            .private(Call::new(endpoint!(POST "/v1/ws-auth")))
-            .await?;
-        // TODO data is a JSON string. Decode it as a borrowed str into a
-        // Zeroizing buffer, then AccessToken::parse; on failure return
-        // answer.protocol(Shape { .. }) without the serde message (it would
-        // quote the token).
-        let _ = answer;
-        todo!()
+        let call = Call::new(endpoint!(POST "/v1/ws-auth")).json(&EmptyBody {});
+        let answer = self.private(call).await?;
+        let Some(raw) = answer.raw() else {
+            return Err(answer.protocol(ProtocolErrorKind::MissingData));
+        };
+        let token: Zeroizing<String> = match serde_json::from_str::<String>(raw) {
+            Ok(text) => Zeroizing::new(text),
+            Err(e) => return Err(answer.shape_error(&e)),
+        };
+        AccessToken::parse(&token)
+            .map_err(|_| answer.protocol(ProtocolErrorKind::Shape { line: 1, column: 1 }))
     }
 
-    /// `PUT /private/v1/ws-auth {"token"}`: resets the expiry to 60 minutes.
-    /// Idempotent, so a cancelled or repeated call is harmless.
+    /// `PUT /private/v1/ws-auth {"token"}`: 有効期限を 60 分にリセットする。
+    /// 冪等なので、キャンセルや繰り返しは無害である。
+    ///
+    /// # エラー
+    /// [REST 共通の集合](crate::rest#エラー)。
     pub(crate) async fn extend_ws_token(&self, token: &AccessToken) -> Result<()> {
         let call = Call::new(endpoint!(PUT "/v1/ws-auth")).json(&TokenBody {
             token: token.reveal(),
@@ -48,11 +65,65 @@ impl Client<Authenticated> {
         self.private(call).await?.empty()
     }
 
-    /// `DELETE /private/v1/ws-auth {"token"}`. Consumes the token.
+    /// `DELETE /private/v1/ws-auth {"token"}`。トークンを消費する。
+    ///
+    /// # エラー
+    /// [REST 共通の集合](crate::rest#エラー)。
     pub(crate) async fn delete_ws_token(&self, token: AccessToken) -> Result<()> {
         let call = Call::new(endpoint!(DELETE "/v1/ws-auth")).json(&TokenBody {
             token: token.reveal(),
         });
         self.private(call).await?.empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::error::{ApiGroup, Error, ProtocolErrorKind};
+    use crate::rest::envelope;
+    use crate::secret::AccessToken;
+
+    #[test]
+    fn the_three_ws_auth_fixtures_decode() {
+        let post = envelope::parse(
+            ApiGroup::PrivateRest,
+            "POST /v1/ws-auth",
+            200,
+            include_bytes!("../../tests/fixtures/private_post_ws-auth.json"),
+        )
+        .unwrap();
+        let token: String = serde_json::from_str(post.raw().unwrap()).unwrap();
+        assert_eq!(
+            AccessToken::parse(&token).unwrap().reveal(),
+            "xxxxxxxxxxxxxxxxxxxx"
+        );
+        for fixture in [
+            &include_bytes!("../../tests/fixtures/private_put_ws-auth.json")[..],
+            &include_bytes!("../../tests/fixtures/private_delete_ws-auth.json")[..],
+        ] {
+            let answer =
+                envelope::parse(ApiGroup::PrivateRest, "PUT /v1/ws-auth", 200, fixture).unwrap();
+            assert!(answer.raw().is_none());
+            assert!(answer.empty().is_ok());
+        }
+    }
+
+    #[test]
+    fn a_non_string_token_is_a_shape_error_without_the_value() {
+        let answer = envelope::parse(
+            ApiGroup::PrivateRest,
+            "POST /v1/ws-auth",
+            200,
+            br#"{"status":0,"data":{"token":"x"}}"#,
+        )
+        .unwrap();
+        let err = answer.data::<String>().unwrap_err();
+        match err {
+            Error::Protocol(p) => {
+                assert!(matches!(p.kind(), ProtocolErrorKind::Shape { .. }));
+                assert!(!p.to_string().contains("token"));
+            }
+            other => panic!("{other:?}"),
+        }
     }
 }

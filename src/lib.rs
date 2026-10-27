@@ -1,10 +1,10 @@
 //! # gmo-coin-api-client
 //!
-//! An async client for the [GMO Coin](https://api.coin.z.com/docs/) exchange
-//! API: public and private REST, public and private WebSocket, on tokio.
+//! [GMO コイン](https://api.coin.z.com/docs/) の取引所 API (Public/Private REST、
+//! Public/Private WebSocket) を tokio 上で呼び出す非同期クライアント。
 //!
 //! ```no_run
-//! use gmo_coin_api_client::{Client, Credentials, Symbol, Price, Size, ClientOrderId, LimitTimeInForce, Side};
+//! use gmo_coin_api_client::{Client, ClientOrderId, Credentials, LimitTimeInForce, Price, Side, Size, Symbol};
 //! use gmo_coin_api_client::rest::{NewOrder, OrderExecution};
 //!
 //! # async fn run() -> gmo_coin_api_client::Result<()> {
@@ -27,20 +27,30 @@
 //! # let _ = id; Ok(()) }
 //! ```
 //!
-//! ## Module map
+//! ## モジュール構成
 //!
-//! | module            | owns                                                         |
-//! |-------------------|--------------------------------------------------------------|
-//! | crate root        | `Client`, `Endpoints`, `Credentials`, `Config`, `Error`, domain primitives |
-//! | [`rest`]          | request and response types for all 32 REST operations         |
-//! | [`ws`]            | `Feed`, channels, events                                      |
-//! | [`error`]         | error detail types                                            |
-//! | `domain` (private)| primitive definitions, re-exported at the root               |
-//! | `secret` (private)| key, secret, token, signing                                   |
-//! | `wire` (private)  | TLS connector, HTTP/1.1 codec and pool, RFC 6455 codec        |
+//! | モジュール          | 所有するもの                                                   |
+//! |---------------------|----------------------------------------------------------------|
+//! | クレートルート      | `Client`、`Endpoints`、`Credentials`、`Config`、`Error`、ドメインプリミティブ |
+//! | [`rest`]            | 32 の REST 操作すべてのリクエスト・応答型                       |
+//! | [`ws`]              | `Feed`、チャネル、イベント                                     |
+//! | [`error`]           | エラーの詳細型                                                 |
+//! | `domain` (非公開)   | プリミティブの定義。ルートで再公開される                       |
+//! | `secret` (非公開)   | キー、シークレット、トークン、署名                             |
+//! | `transport` (非公開)| TLS コネクタ、hyper の HTTP/1.1 プールと往復、tokio-tungstenite の接続 |
+//!
+//! ## 設計上の約束
+//!
+//! - `Decimal` は `i128` の仮数と `u8` のスケールで、正確に比較し、受け取った
+//!   文字列をそのまま出力する。十進数クレートは使わない。
+//! - 秘密 (`ApiKey`、`ApiSecret`、`Credentials`、アクセストークン) は `Debug` で
+//!   秘匿され、`Clone` できず、drop 時にゼロ埋めされる。
+//! - 平文の `http`/`ws` はループバック IP リテラルに対してだけ受け付ける。
+//! - REST の呼び出しは絞らない。ERR-5003 は `Error::is_rate_limited` で見える。
 
 #![forbid(unsafe_code)]
-// Sketch stage: bodies are `todo!()`, so most crate-private items have no caller yet.
+// フェーズ 2 (Private REST) とフェーズ 3 (WebSocket) の本体が `todo!()` の間、
+// それらにしか呼ばれないクレート内部の項目は未使用になる。
 #![allow(dead_code)]
 
 mod client;
@@ -49,7 +59,7 @@ mod endpoint;
 pub mod error;
 pub mod rest;
 mod secret;
-mod wire;
+mod transport;
 pub mod ws;
 
 pub use client::{

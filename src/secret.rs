@@ -1,45 +1,50 @@
-//! Credentials and request signing.
+//! 認証情報とリクエスト署名。
 //!
-//! The three secret-bearing values (API key, API secret, WebSocket access
-//! token) share these rules, each enforced by the type rather than a comment:
+//! 秘密を持つ 3 つの値 (API キー、API シークレット、WebSocket アクセストークン)
+//! は次の規則を共有し、それぞれコメントではなく型によって強制される。
 //!
-//! - `Debug` prints `<redacted>`. No `Display`, no `Serialize`.
-//! - No `Clone`. A client shares one copy through `Arc`.
-//! - The buffer is zeroed on drop with `zeroize` (already in the tree through
-//!   rustls, so it costs no crate).
-//! - The API secret has no accessor at all. Its one operation is signing,
-//!   and that lives in this module.
+//! - `Debug` は `<redacted>` を出力する。`Display` も `Serialize` もない。
+//! - `Clone` しない。クライアントは `Arc` で 1 つの複製を共有する。
+//! - バッファは drop 時に `zeroize` でゼロ埋めされる (rustls 経由で既に
+//!   ツリーにあるので、クレートは増えない)。
+//! - API シークレットにはアクセサが一切ない。唯一の操作は署名で、それは
+//!   このモジュールの中にある。
 //!
-//! `ring::hmac::Key` holds the HMAC key schedule, which is as sensitive as
-//! the secret, and ring neither zeroizes it nor makes it `!Clone`. So no
-//! `hmac::Key` is stored. One is built on the stack per signature (two
-//! SHA-256 blocks of work) and dropped at the end of the call.
+//! `ring::hmac::Key` は HMAC の鍵スケジュールを持ち、シークレットと同じく
+//! 機微である。ring はそれをゼロ埋めせず `Clone` も禁止しないので、
+//! `hmac::Key` は保存しない。署名ごとにスタック上で作り (SHA-256 ブロック
+//! 2 つ分の計算)、呼び出しの終わりで捨てる。
+//!
+//! # 残存リスク
+//! 署名された値を hyper に渡すとき、`API-KEY` と `API-SIGN` は hyper の
+//! `HeaderMap` に複製され、その複製はゼロ埋めされない。詳細は
+//! `transport` モジュールのドキュメントを参照。
 
 use core::fmt;
 
 use zeroize::Zeroizing;
 
-use crate::domain::{InvalidValue, Primitive, check_size_and_lexical};
-use crate::wire::http::Method;
+use crate::domain::{InvalidValue, Primitive, Violation, check_size_and_lexical};
+use crate::transport::http::Method;
 
-/// `API-KEY`.
+/// `API-KEY`。
 ///
-/// # Invariants
-/// 1 to 128 bytes of visible ASCII (`0x21..=0x7E`). This excludes CR and LF,
-/// so the key cannot inject a header line.
+/// # 不変条件
+/// 1 から 128 バイトの可視 ASCII (`0x21..=0x7E`)。CR と LF を含まないので、
+/// キーがヘッダ行を注入することはできない。
 pub struct ApiKey(Zeroizing<String>);
 
 impl ApiKey {
-    /// Takes ownership so the caller's buffer becomes the zeroized one.
+    /// 所有権を受け取るので、呼び出し側のバッファがそのままゼロ埋め対象になる。
     ///
-    /// # Preconditions
-    /// None.
+    /// # 事前条件
+    /// なし。
     ///
-    /// # Postconditions
-    /// On `Ok`, the key lives in a zeroizing buffer. On `Err`, the input has been zeroed.
+    /// # 事後条件
+    /// `Ok` ならキーはゼロ埋めされるバッファの中にある。`Err` でも入力はゼロ埋めされている。
     ///
-    /// # Errors
-    /// `Size` or `Lexical`. The error never contains the input.
+    /// # エラー
+    /// `Size` または `Lexical`。エラーは入力を決して含まない。
     pub fn new(key: String) -> Result<Self, InvalidValue> {
         let key = Zeroizing::new(key);
         check_size_and_lexical(Primitive::ApiKey, &key, 1, 128, |b| b.is_ascii_graphic())?;
@@ -57,25 +62,26 @@ impl fmt::Debug for ApiKey {
     }
 }
 
-/// The API secret. Use-only: it can sign, and nothing else.
+/// API シークレット。使うことしかできない: 署名はできるが、それ以外は何もできない。
 ///
-/// # Invariants
-/// 1 to 256 bytes of visible ASCII. Zeroed on drop. Never readable.
+/// # 不変条件
+/// 1 から 256 バイトの可視 ASCII。drop 時にゼロ埋め。決して読み出せない。
 pub struct ApiSecret(Zeroizing<String>);
 
 impl ApiSecret {
-    /// Takes ownership, so the caller's allocation becomes the zeroized one
-    /// and this call leaves no copy behind. The value is wrapped before it is
-    /// validated, so a rejected secret is zeroed too.
+    /// 所有権を受け取るので、呼び出し側の割り当てがそのままゼロ埋め対象になり、
+    /// この呼び出しは複製を残さない。値は検証の前に包まれるので、拒否された
+    /// シークレットもゼロ埋めされる。
     ///
-    /// # Preconditions
-    /// None.
+    /// # 事前条件
+    /// なし。
     ///
-    /// # Postconditions
-    /// On `Ok`, the secret lives in a zeroizing buffer and can only sign. On `Err`, the input has been zeroed.
+    /// # 事後条件
+    /// `Ok` ならシークレットはゼロ埋めされるバッファの中にあり、署名にしか使えない。
+    /// `Err` でも入力はゼロ埋めされている。
     ///
-    /// # Errors
-    /// `Size` or `Lexical`. The error never contains the input.
+    /// # エラー
+    /// `Size` または `Lexical`。エラーは入力を決して含まない。
     pub fn new(secret: String) -> Result<Self, InvalidValue> {
         let secret = Zeroizing::new(secret);
         check_size_and_lexical(Primitive::ApiSecret, &secret, 1, 256, |b| {
@@ -84,14 +90,22 @@ impl ApiSecret {
         Ok(Self(secret))
     }
 
-    /// `hex(HMAC-SHA256(secret, message))`.
+    /// `hex(HMAC-SHA256(secret, message))`。`message` の各部分は連結した
+    /// 複製を作らずに順に取り込む。
     fn sign(&self, message: &[&[u8]]) -> Signature {
-        // TODO let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, self.0.as_bytes());
-        // let mut ctx = ring::hmac::Context::with_key(&key);
-        // for part in message { ctx.update(part) }   // no concatenated copy
-        // hex-encode ctx.sign().as_ref() (32 bytes) into Signature([u8; 64]).
-        let _ = message;
-        todo!()
+        let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, self.0.as_bytes());
+        let mut ctx = ring::hmac::Context::with_key(&key);
+        for part in message {
+            ctx.update(part);
+        }
+        let tag = ctx.sign();
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut hex = [0u8; 64];
+        for (i, b) in tag.as_ref().iter().enumerate() {
+            hex[2 * i] = HEX[usize::from(b >> 4)];
+            hex[2 * i + 1] = HEX[usize::from(b & 0x0f)];
+        }
+        Signature(hex)
     }
 }
 
@@ -101,52 +115,71 @@ impl fmt::Debug for ApiSecret {
     }
 }
 
-/// An API key and its secret.
+/// API キーとそのシークレットの組。
 pub struct Credentials {
     key: ApiKey,
     secret: ApiSecret,
 }
 
 impl Credentials {
-    /// Pairs a key with its secret.
+    /// キーとシークレットを組にする。
     ///
-    /// # Preconditions
-    /// None.
+    /// # 事前条件
+    /// なし。
     ///
-    /// # Postconditions
-    /// Owns both values. Neither is readable through `Credentials`.
+    /// # 事後条件
+    /// 両方の値を所有する。どちらも `Credentials` を通して読み出せない。
     ///
-    /// # Errors
-    /// Infallible.
+    /// # エラー
+    /// 失敗しない。
     pub fn new(key: ApiKey, secret: ApiSecret) -> Self {
         Self { key, secret }
     }
 
-    /// Reads `GMO_API_KEY` and `GMO_API_SECRET`.
+    /// 環境変数 `GMO_API_KEY` と `GMO_API_SECRET` を読む。
     ///
-    /// # Preconditions
-    /// None.
+    /// # 事前条件
+    /// なし。
     ///
-    /// # Postconditions
-    /// On `Ok`, as [`Credentials::new`].
+    /// # 事後条件
+    /// `Ok` なら [`Credentials::new`] と同じ。
     ///
-    /// # Errors
-    /// `InvalidValue` with `Size { actual: 0, .. }` when a variable is unset,
-    /// otherwise as [`ApiKey::new`] / [`ApiSecret::new`].
+    /// # エラー
+    /// 変数が未設定のとき `Size { actual: 0, .. }` の `InvalidValue`。
+    /// それ以外は [`ApiKey::new`] / [`ApiSecret::new`] と同じ。
     pub fn from_env() -> Result<Self, InvalidValue> {
-        todo!()
+        Self::from_lookup(|name| std::env::var(name).ok())
     }
 
-    /// Signs one private REST request.
+    /// `from_env` の純粋な本体。`lookup` が変数名から値を引く。
+    fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Self, InvalidValue> {
+        let read = |name: &str, primitive: Primitive, max: usize| {
+            lookup(name).map(Zeroizing::new).ok_or(InvalidValue {
+                primitive,
+                violation: Violation::Size {
+                    min: 1,
+                    max,
+                    actual: 0,
+                },
+            })
+        };
+        let key = read("GMO_API_KEY", Primitive::ApiKey, 128)?;
+        let secret = read("GMO_API_SECRET", Primitive::ApiSecret, 256)?;
+        Ok(Self::new(
+            ApiKey::new(key.to_string())?,
+            ApiSecret::new(secret.to_string())?,
+        ))
+    }
+
+    /// Private REST リクエストを 1 つ署名する。
     ///
-    /// # Preconditions
-    /// `body` is the exact byte sequence that will be written to the socket
-    /// (empty for GET). `path` is the `/v1/...` path without `/private` and
-    /// without the query string; [`SignedPath`] makes any other form
-    /// unrepresentable.
+    /// # 事前条件
+    /// `body` はソケットに書き込まれるバイト列そのもの (GET なら空)。`path` は
+    /// `/private` を含まず、クエリ文字列も含まない `/v1/...` のパス。
+    /// [`SignedPath`] が他の形を表現できなくしている。
     ///
-    /// # Postconditions
-    /// The returned headers are valid only for `timestamp_ms`; a retry signs again.
+    /// # 事後条件
+    /// 返されたヘッダは `timestamp_ms` に対してだけ有効。再試行は再署名する。
     pub(crate) fn sign_request(
         &self,
         timestamp_ms: u64,
@@ -175,16 +208,16 @@ impl fmt::Debug for Credentials {
     }
 }
 
-/// The three private-API headers for one request. Written straight into the
-/// request buffer; never stored, never logged.
+/// 1 リクエスト分の Private API ヘッダ 3 つ。そのままリクエストに書き込まれ、
+/// 保存もログ出力もされない。
 pub(crate) struct AuthHeaders<'a> {
     pub(crate) key: &'a ApiKey,
     pub(crate) timestamp: String,
     pub(crate) sign: Signature,
 }
 
-/// 64 lowercase hex digits. Redacted: a fresh signature is replayable until
-/// the exchange's timestamp window closes.
+/// 小文字 16 進数 64 桁。秘匿対象: 新しい署名は取引所のタイムスタンプ窓が
+/// 閉じるまで再生可能である。
 pub(crate) struct Signature([u8; 64]);
 
 impl Signature {
@@ -199,11 +232,11 @@ impl fmt::Debug for Signature {
     }
 }
 
-/// The path that is both signed and appended to the base URL's prefix.
+/// 署名され、かつベース URL のプレフィックスに連結されるパス。
 ///
-/// # Invariants
-/// Starts with `/v1/`, has no `?`, and is `'static`. Every endpoint declares
-/// its path as a constant, so a bad one fails the build in `SignedPath::new`.
+/// # 不変条件
+/// `/v1/` で始まり、`?` を含まず、`'static` である。各エンドポイントは
+/// パスを定数として宣言するので、不正なものは `SignedPath::new` でビルドが失敗する。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct SignedPath(&'static str);
 
@@ -224,14 +257,14 @@ impl SignedPath {
     }
 }
 
-/// The private WebSocket access token. Lives only inside a `Feed`.
+/// Private WebSocket のアクセストークン。`Feed` の中にだけ存在する。
 ///
-/// # Invariants
-/// 1 to 256 bytes of URL-unreserved characters (`A-Z a-z 0-9 - . _ ~`), so
-/// it can sit in a URL path segment without escaping and cannot add a path
-/// segment or query. Zeroed on drop. Never in an error: errors carry
-/// `&'static str` operation names, and the dial path is built in a local
-/// buffer that is zeroized after the handshake request is written.
+/// # 不変条件
+/// 1 から 256 バイトの URL 非予約文字 (`A-Z a-z 0-9 - . _ ~`)。したがって
+/// エスケープなしで URL のパスセグメントに置け、セグメントやクエリを追加
+/// できない。drop 時にゼロ埋め。エラーには決して入らない: エラーが持つのは
+/// `&'static str` の操作名だけで、接続先パスは接続時にローカルのバッファで
+/// 組み立てられる。
 pub(crate) struct AccessToken(Zeroizing<String>);
 
 impl AccessToken {
@@ -242,7 +275,7 @@ impl AccessToken {
         Ok(Self(Zeroizing::new(text.to_owned())))
     }
 
-    /// Only callers: the WebSocket dial path and the `ws-auth` PUT/DELETE bodies.
+    /// 呼び出し元は WebSocket の接続先パスと `ws-auth` の PUT/DELETE ボディだけ。
     pub(crate) fn reveal(&self) -> &str {
         &self.0
     }
@@ -251,5 +284,149 @@ impl AccessToken {
 impl fmt::Debug for AccessToken {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("AccessToken(<redacted>)")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(serde::Deserialize)]
+    struct Vectors {
+        secret: String,
+        cases: Vec<Case>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct Case {
+        timestamp: String,
+        method: String,
+        path: String,
+        body: String,
+        sign: String,
+    }
+
+    #[test]
+    fn signatures_match_the_reference_vectors() {
+        let vectors: Vectors =
+            serde_json::from_str(include_str!("../tests/fixtures/signing_vectors.json")).unwrap();
+        let credentials = Credentials::new(
+            ApiKey::new("k".to_owned()).unwrap(),
+            ApiSecret::new(vectors.secret).unwrap(),
+        );
+        assert_eq!(vectors.cases.len(), 6);
+        for case in vectors.cases {
+            let method = match case.method.as_str() {
+                "GET" => Method::Get,
+                "POST" => Method::Post,
+                "PUT" => Method::Put,
+                "DELETE" => Method::Delete,
+                other => panic!("unknown method {other}"),
+            };
+            let path = match case.path.as_str() {
+                "/v1/account/margin" => SignedPath::new("/v1/account/margin"),
+                "/v1/orders" => SignedPath::new("/v1/orders"),
+                "/v1/order" => SignedPath::new("/v1/order"),
+                "/v1/ws-auth" => SignedPath::new("/v1/ws-auth"),
+                other => panic!("unknown path {other}"),
+            };
+            let headers = credentials.sign_request(
+                case.timestamp.parse().unwrap(),
+                method,
+                path,
+                case.body.as_bytes(),
+            );
+            assert_eq!(
+                headers.sign.as_str(),
+                case.sign,
+                "{} {} {:?}",
+                case.method,
+                case.path,
+                case.body
+            );
+            assert_eq!(headers.timestamp, case.timestamp);
+            assert_eq!(headers.key.header_value(), "k");
+        }
+    }
+
+    #[test]
+    fn debug_output_reveals_no_secret() {
+        let key = ApiKey::new("THEKEY123".to_owned()).unwrap();
+        let secret = ApiSecret::new("THESECRET456".to_owned()).unwrap();
+        assert!(!format!("{key:?}").contains("THEKEY123"));
+        assert!(!format!("{secret:?}").contains("THESECRET456"));
+        let credentials = Credentials::new(key, secret);
+        let printed = format!("{credentials:?}");
+        assert!(!printed.contains("THEKEY123") && !printed.contains("THESECRET456"));
+        let headers = credentials.sign_request(1, Method::Get, SignedPath::new("/v1/x"), b"");
+        assert!(!format!("{:?}", headers.sign).contains(headers.sign.as_str()));
+        let token = AccessToken::parse("tok-en.123_~").unwrap();
+        assert!(!format!("{token:?}").contains("tok-en"));
+        assert_eq!(token.reveal(), "tok-en.123_~");
+    }
+
+    #[test]
+    fn key_and_secret_validation() {
+        assert!(matches!(
+            ApiKey::new(String::new()).unwrap_err().violation,
+            Violation::Size { .. }
+        ));
+        assert_eq!(
+            ApiKey::new("ab c".to_owned()).unwrap_err().violation,
+            Violation::Lexical { offset: 2 }
+        );
+        assert_eq!(
+            ApiSecret::new("x\r\n".to_owned()).unwrap_err().violation,
+            Violation::Lexical { offset: 1 }
+        );
+        assert!(matches!(
+            ApiSecret::new("s".repeat(257)).unwrap_err().violation,
+            Violation::Size { .. }
+        ));
+        assert!(matches!(
+            AccessToken::parse("a/b").unwrap_err().violation,
+            Violation::Lexical { .. }
+        ));
+        assert!(matches!(
+            AccessToken::parse("").unwrap_err().violation,
+            Violation::Size { .. }
+        ));
+    }
+
+    #[test]
+    fn from_env_reports_an_unset_variable_as_size_zero() {
+        let err = Credentials::from_lookup(|_| None).unwrap_err();
+        assert_eq!(err.primitive, Primitive::ApiKey);
+        assert_eq!(
+            err.violation,
+            Violation::Size {
+                min: 1,
+                max: 128,
+                actual: 0
+            }
+        );
+        let only_key = |name: &str| (name == "GMO_API_KEY").then(|| "k".to_owned());
+        let err = Credentials::from_lookup(only_key).unwrap_err();
+        assert_eq!(err.primitive, Primitive::ApiSecret);
+        let both = |name: &str| {
+            Some(if name == "GMO_API_KEY" {
+                "key".to_owned()
+            } else {
+                "secret".to_owned()
+            })
+        };
+        let credentials = Credentials::from_lookup(both).unwrap();
+        assert_eq!(credentials.key.header_value(), "key");
+        let bad = |name: &str| {
+            Some(if name == "GMO_API_KEY" {
+                "key".to_owned()
+            } else {
+                "has space".to_owned()
+            })
+        };
+        assert_eq!(
+            Credentials::from_lookup(bad).unwrap_err().violation,
+            Violation::Lexical { offset: 3 }
+        );
     }
 }

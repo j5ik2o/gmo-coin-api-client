@@ -18,14 +18,11 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Instant;
 
-use zeroize::Zeroizing;
-
 use super::{Disconnect, FeedChannel, PrivateChannel, PrivateEvent, PublicChannel, PublicEvent};
 use crate::client::{Authenticated, Client, Inner};
 use crate::error::{ApiGroup, ContractViolation, Error, ProtocolErrorKind, Result};
 use crate::secret::AccessToken;
-use crate::wire::Stream;
-use crate::wire::ws_frame::FrameDecoder;
+use crate::transport::ws::WsStream;
 
 /// Channel-specific knowledge the session needs. Sealed (private module), so
 /// these methods are not part of the public API.
@@ -149,8 +146,11 @@ struct TokenLease {
 enum State<C: FeedChannel> {
     Idle,
     Dialing(DialFuture),
-    Connected(Connection, Sent<C>),
-    Waiting { until: Instant },
+    /// tokio-tungstenite の接続は大きいので Box に入れる。
+    Connected(Box<Connection>, Sent<C>),
+    Waiting {
+        until: Instant,
+    },
     Closed,
 }
 
@@ -161,15 +161,10 @@ struct Sent<C: FeedChannel> {
 }
 
 pub(crate) struct Connection {
-    stream: Stream,
-    decoder: FrameDecoder,
-    /// Raw bytes read but not yet decoded. Bounded by the decoder's limit
-    /// plus one read buffer.
-    read_buf: Vec<u8>,
-    /// Frames queued for writing (pongs, commands, close) and how much of the
-    /// front has been written. Zeroized: the handshake request held the token.
-    outbox: Zeroizing<Vec<u8>>,
-    written: usize,
+    /// tokio-tungstenite の接続。フレーミング、ping への pong、サイズ上限は
+    /// すべてこの中にある。書き込みは `poll_ready`、`start_send`、`poll_flush`
+    /// で行い、`SinkExt::send` を `select!` の中に置かない (SYNTHESIS を参照)。
+    stream: WsStream,
     last_frame_at: Instant,
 }
 

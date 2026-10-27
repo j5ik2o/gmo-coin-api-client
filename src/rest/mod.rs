@@ -1,29 +1,29 @@
-//! REST request and response types, and the one request path every endpoint
-//! method uses.
+//! REST のリクエスト・応答型と、すべてのエンドポイントメソッドが使う
+//! 唯一のリクエスト経路。
 //!
-//! The endpoint methods are inherent methods on [`Client`], one per
-//! documented operation, grouped by file:
+//! エンドポイントメソッドは [`Client`] の固有メソッドで、文書化された操作
+//! 1 つにつき 1 つ、ファイルごとに次のように分かれている。
 //!
-//! | file         | receiver                  | operations |
-//! |--------------|---------------------------|------------|
-//! | `public.rs`  | `Client<A>` for any `A`   | status, ticker, orderbooks, trades, klines, symbols |
+//! | ファイル     | レシーバ                  | 操作 |
+//! |--------------|---------------------------|------|
+//! | `public.rs`  | 任意の `A` の `Client<A>` | status, ticker, orderbooks, trades, klines, symbols |
 //! | `account.rs` | `Client<Authenticated>`   | account/margin, account/assets, account/tradingVolume, account/fiatDeposit/history, account/fiatWithdrawal/history, account/deposit/history, account/withdrawal/history, account/exchangeFee/history, account/transfer |
 //! | `trading.rs` | `Client<Authenticated>`   | orders, activeOrders, executions, latestExecutions, openPositions, positionSummary, order, changeOrder, cancelOrder, cancelOrders, cancelBulkOrder, closeOrder, closeBulkOrder, changeLosscutPrice |
-//! | `ws_auth.rs` | crate-private             | ws-auth POST, PUT, DELETE (owned by the private feed) |
+//! | `ws_auth.rs` | クレート内部              | ws-auth の POST、PUT、DELETE (Private フィードが所有) |
 //!
-//! # Errors
+//! # エラー
 //!
-//! Every REST method can fail with the same set, and each method's own
-//! `# Errors` section adds only what is specific to it:
-//! - `Transport`: no complete answer. Check `Error::outcome_unknown` before
-//!   resending anything that moves money.
-//! - `Protocol`: an answer that is not the documented shape (fail closed).
-//! - `Api`: `status != 0`, for example ERR-5003 (`Error::is_rate_limited`),
-//!   ERR-5201/5202 (maintenance), ERR-5008/5009 (local clock skew).
+//! すべての REST メソッドは次の共通集合で失敗し得る。各メソッド自身の
+//! `# エラー` 節は、そのメソッドに固有のものだけを加える。
+//! - `Transport`: 完全な答えがない。お金を動かすものを再送する前に
+//!   `Error::outcome_unknown` を確かめること。
+//! - `Protocol`: 文書化された形でない答え (フェイルクローズド)。
+//! - `Api`: `status != 0`。たとえば ERR-5003 (`Error::is_rate_limited`)、
+//!   ERR-5201/5202 (メンテナンス)、ERR-5008/5009 (ローカル時計のずれ)。
 //!
-//! Each method body is the same four steps: check the preconditions the
-//! types could not carry, build a `Call`, send it (the envelope is checked
-//! once, in `Client::send`), then decode `data` and check postconditions.
+//! 各メソッドの本体は同じ 4 段階である。型では表せない事前条件を検査し、
+//! `Call` を組み立て、送り (エンベロープは `Client::send` の中で一度だけ検査
+//! される)、`data` をデコードして事後条件を検査する。
 
 mod account;
 mod envelope;
@@ -46,29 +46,31 @@ pub use trading::{
 };
 
 use core::num::NonZeroU32;
+use std::time::SystemTime;
 
+use http_body_util::Full;
+use hyper::body::Bytes;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use serde_json::value::RawValue;
 use zeroize::Zeroizing;
 
 use crate::client::{Access, Authenticated, Client};
 use crate::domain::{InvalidValue, Primitive, Violation};
 use crate::error::{ApiGroup, Error, ProtocolError, ProtocolErrorKind, Result};
 use crate::secret::{Credentials, SignedPath};
-use crate::wire::http::Method;
+use crate::transport::http::{Method, Route, round_trip};
 
-/// One documented operation.
+/// 文書化された操作 1 つ。
 #[derive(Clone, Copy)]
 pub(crate) struct Endpoint {
     pub(crate) method: Method,
     pub(crate) path: SignedPath,
-    /// `"POST /v1/order"`: the only operation identity errors carry.
+    /// `"POST /v1/order"`: エラーが持つ唯一の操作の識別子。
     pub(crate) operation: &'static str,
 }
 
-/// Declares an endpoint once; the signed path and the error label are both
-/// derived from the same literal, so they cannot disagree.
+/// エンドポイントを一度だけ宣言する。署名対象のパスとエラーのラベルは
+/// 同じリテラルから導かれるので、食い違うことがない。
 macro_rules! endpoint {
     (GET $path:literal) => { $crate::rest::endpoint!(@ Get "GET" $path) };
     (POST $path:literal) => { $crate::rest::endpoint!(@ Post "POST" $path) };
@@ -76,7 +78,7 @@ macro_rules! endpoint {
     (DELETE $path:literal) => { $crate::rest::endpoint!(@ Delete "DELETE" $path) };
     (@ $m:ident $name:literal $path:literal) => {
         $crate::rest::Endpoint {
-            method: $crate::wire::http::Method::$m,
+            method: $crate::transport::http::Method::$m,
             path: $crate::secret::SignedPath::new($path),
             operation: concat!($name, " ", $path),
         }
@@ -84,9 +86,9 @@ macro_rules! endpoint {
 }
 pub(crate) use endpoint;
 
-/// A request ready to send. The body is serialized exactly once, here, and
-/// the same buffer is signed and written. Zeroized on drop: the `ws-auth`
-/// PUT and DELETE bodies hold the access token.
+/// 送信準備のできたリクエスト。ボディはここで一度だけシリアライズされ、
+/// 同じバッファが署名され、送られる。drop 時にゼロ埋めされる: `ws-auth` の
+/// PUT と DELETE のボディはアクセストークンを含む。
 pub(crate) struct Call {
     pub(crate) endpoint: Endpoint,
     pub(crate) query: Vec<(&'static str, String)>,
@@ -102,20 +104,21 @@ impl Call {
         }
     }
 
-    /// Query values come from domain primitives whose lexical rules exclude
-    /// every byte that would need percent-encoding.
+    /// クエリの値はドメインプリミティブから来る。その字句規則はパーセント
+    /// エンコードが必要なバイトをすべて除外している。
     pub(crate) fn query(mut self, key: &'static str, value: impl core::fmt::Display) -> Self {
         self.query.push((key, value.to_string()));
         self
     }
 
-    /// # Postconditions
-    /// `self.body` holds the JSON bytes that will be both signed and sent.
+    /// # 事後条件
+    /// `self.body` は、署名され送られる JSON バイト列を保持する。
     ///
-    /// # Panics
-    /// If `body` fails to serialize, which request types built from domain
-    /// primitives cannot (no non-string map keys, no floats). Panicking sends
-    /// nothing; substituting an empty body would sign and send the wrong request.
+    /// # パニック
+    /// `body` のシリアライズに失敗したとき。ドメインプリミティブから組み立てた
+    /// リクエスト型では起きない (文字列でないマップキーも浮動小数点もない)。
+    /// パニックすれば何も送られない。空のボディで代用すると、誤ったリクエストに
+    /// 署名して送ってしまう。
     pub(crate) fn json<B: Serialize>(mut self, body: &B) -> Self {
         let bytes =
             serde_json::to_vec(body).expect("request bodies are built from domain primitives");
@@ -126,36 +129,63 @@ impl Call {
         );
         self
     }
+
+    /// `prefix + path + ?query`。
+    fn target(&self, prefix: &str) -> String {
+        let mut target = format!("{prefix}{}", self.endpoint.path.as_str());
+        for (i, (key, value)) in self.query.iter().enumerate() {
+            target.push(if i == 0 { '?' } else { '&' });
+            target.push_str(key);
+            target.push('=');
+            target.push_str(value);
+        }
+        target
+    }
 }
 
-/// A success envelope (`status == 0`), with `data` not yet decoded.
+/// 成功エンベロープ (`status == 0`)。`data` はまだデコードされていない。
+///
+/// `data` の生テキストはゼロ埋めされるバッファに保持する。`ws-auth` の
+/// 答えではそれがアクセストークンそのものだからである。
 pub(crate) struct Answer {
     api: ApiGroup,
     operation: &'static str,
-    data: Option<Box<RawValue>>,
+    data: Option<Zeroizing<String>>,
+}
+
+impl core::fmt::Debug for Answer {
+    /// `data` は出力しない。`ws-auth` ではそれがトークンである。
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Answer")
+            .field("api", &self.api)
+            .field("operation", &self.operation)
+            .field("has_data", &self.data.is_some())
+            .finish()
+    }
 }
 
 impl Answer {
-    /// Decodes `data` as `T`.
+    /// `data` を `T` としてデコードする。
     ///
-    /// # Errors
-    /// `Protocol(MissingData)` when `data` is absent; `Protocol(Shape)` when
-    /// it does not match `T`. Never substitutes a default.
+    /// # エラー
+    /// `data` がなければ `Protocol(MissingData)`、`T` と一致しなければ
+    /// `Protocol(Shape)`。既定値を補うことはない。
     pub(crate) fn data<T: DeserializeOwned>(self) -> Result<T> {
         let Some(raw) = &self.data else {
             return Err(self.protocol(ProtocolErrorKind::MissingData));
         };
-        serde_json::from_str(raw.get()).map_err(|e| {
-            self.protocol(ProtocolErrorKind::Shape {
-                line: e.line(),
-                column: e.column(),
-            })
-        })
+        serde_json::from_str(raw).map_err(|e| self.shape_error(&e))
     }
 
-    /// For operations documented with no `data` (changeOrder, cancelOrder,
-    /// changeLosscutPrice, ws-auth PUT and DELETE). A `data` field, if the
-    /// exchange ever adds one, is ignored: it carries no state this call needs.
+    /// `data` の生テキスト。借用デコード (`WireCancelOrders<'a>` など) や、
+    /// serde を通さずに値を取り出す呼び出し元のため。
+    pub(crate) fn raw(&self) -> Option<&str> {
+        self.data.as_deref().map(String::as_str)
+    }
+
+    /// `data` を持たないと文書化された操作 (changeOrder、cancelOrder、
+    /// changeLosscutPrice、ws-auth の PUT と DELETE) のため。取引所が将来
+    /// `data` を加えても無視する。この呼び出しが必要とする状態は含まれない。
     pub(crate) fn empty(self) -> Result<()> {
         Ok(())
     }
@@ -167,43 +197,92 @@ impl Answer {
             kind,
         })
     }
+
+    /// serde のエラーを位置だけに落とす。メッセージは値を引用するので捨てる。
+    pub(crate) fn shape_error(&self, e: &serde_json::Error) -> Error {
+        self.protocol(ProtocolErrorKind::Shape {
+            line: e.line(),
+            column: e.column(),
+        })
+    }
 }
 
 impl<A: Access> Client<A> {
-    /// Sends a public REST call.
+    /// Public REST 呼び出しを送る。
     pub(crate) async fn public(&self, call: Call) -> Result<Answer> {
         self.send(ApiGroup::PublicRest, None, call).await
     }
 
-    /// The single request path: build target, sign if `credentials`, round
-    /// trip, then check the envelope.
+    /// 唯一のリクエスト経路: 宛先を組み立て、`credentials` があれば署名し、
+    /// 往復し、エンベロープを検査する。
     ///
-    /// # Postconditions
-    /// `Ok` only for `status == 0`. `status != 0` is `Error::Api`; anything
-    /// that is not an envelope is `Error::Protocol`.
+    /// # 事後条件
+    /// `Ok` は `status == 0` のときだけ。`status != 0` は `Error::Api`、
+    /// エンベロープでないものはすべて `Error::Protocol`。
     async fn send(
         &self,
         api: ApiGroup,
         credentials: Option<&Credentials>,
         call: Call,
     ) -> Result<Answer> {
-        // TODO
-        // let (base, pool) = match api { PublicRest => (&endpoints.public_rest, &public_pool), PrivateRest => (private..) };
-        // let target = format!("{}{}{}", base.prefix, call.endpoint.path.as_str(), encode_query(&call.query));
-        // let route = Route { api, operation: call.endpoint.operation, method: call.endpoint.method, base, pool };
-        // let response = wire::http::round_trip(&inner.connector, &route, &config,
-        //     &mut |out| {   // re-run on a stale-connection GET retry: fresh timestamp, fresh signature
-        //         let auth = credentials.map(|c| c.sign_request(now_ms(), method, call.endpoint.path, &call.body));
-        //         encode_request(&host, &Request { method, target: &target, auth, body: &call.body }, out);
-        //     }).await.map_err(Error::Transport)?;
-        // envelope::parse(api, call.endpoint.operation, response.status, &response.body)
-        let _ = (api, credentials, call, envelope::parse);
-        todo!()
+        let inner = &self.inner;
+        let (base, pool) = match api {
+            ApiGroup::PrivateRest => (inner.endpoints.private_rest.base(), &inner.private_pool),
+            _ => (inner.endpoints.public_rest.base(), &inner.public_pool),
+        };
+        let route = Route {
+            api,
+            operation: call.endpoint.operation,
+            method: call.endpoint.method,
+            base,
+            pool,
+        };
+        let target = call.target(&base.prefix);
+        let host = base.host_header();
+        // 古い接続での GET 再試行ではもう一度呼ばれる: タイムスタンプと署名が新しくなる。
+        let mut encode = || {
+            let mut request = http::Request::builder()
+                .method(call.endpoint.method.to_http())
+                .uri(target.as_str())
+                .header(http::header::HOST, host.as_str())
+                .header(
+                    http::header::USER_AGENT,
+                    concat!("gmo-coin-api-client/", env!("CARGO_PKG_VERSION")),
+                )
+                .header(http::header::ACCEPT, "application/json");
+            if call.endpoint.method != Method::Get {
+                request = request.header(http::header::CONTENT_TYPE, "application/json");
+            }
+            if let Some(credentials) = credentials {
+                let auth = credentials.sign_request(
+                    now_ms(),
+                    call.endpoint.method,
+                    call.endpoint.path,
+                    &call.body,
+                );
+                request = request
+                    .header("API-KEY", auth.key.header_value())
+                    .header("API-TIMESTAMP", auth.timestamp.as_str())
+                    .header("API-SIGN", auth.sign.as_str());
+            }
+            request
+                .body(Full::new(Bytes::copy_from_slice(&call.body)))
+                .expect("the target and headers are built from validated primitives")
+        };
+        let response = round_trip(&inner.connector, &route, &inner.config, &mut encode)
+            .await
+            .map_err(Error::Transport)?;
+        envelope::parse(
+            api,
+            call.endpoint.operation,
+            response.status,
+            &response.body,
+        )
     }
 }
 
 impl Client<Authenticated> {
-    /// Sends a signed private REST call.
+    /// 署名付きの Private REST 呼び出しを送る。
     pub(crate) async fn private(&self, call: Call) -> Result<Answer> {
         let credentials = self.access.0.clone();
         self.send(ApiGroup::PrivateRest, Some(&credentials), call)
@@ -211,11 +290,19 @@ impl Client<Authenticated> {
     }
 }
 
-/// `page` and `count` for the page-numbered lists (trades, activeOrders,
-/// latestExecutions, openPositions).
+/// `API-TIMESTAMP`: 現在時刻のミリ秒 Unix 時刻。
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
+
+/// ページ番号で区切られたリスト (trades、activeOrders、latestExecutions、
+/// openPositions) の `page` と `count`。
 ///
-/// # Invariants
-/// `page >= 1`, `1 <= count <= 100`.
+/// # 不変条件
+/// `page >= 1`、`1 <= count <= 100`。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PageRequest {
     page: NonZeroU32,
@@ -225,21 +312,22 @@ pub struct PageRequest {
 impl PageRequest {
     pub const MAX_COUNT: u8 = 100;
 
-    /// Page 1, 100 items: the exchange's own default.
+    /// 1 ページ目、100 件: 取引所自身の既定。
     pub const FIRST: PageRequest = PageRequest {
         page: NonZeroU32::MIN,
         count: Self::MAX_COUNT,
     };
 
-    /// A page number and a page size.
+    /// ページ番号とページサイズ。
     ///
-    /// # Preconditions
-    /// None.
+    /// # 事前条件
+    /// なし。
     ///
-    /// # Postconditions
-    /// On `Ok`, `page() == page` and `count() == count`.
-    /// # Errors
-    /// `Semantics` when `page == 0` or `count` is outside `1..=100`.
+    /// # 事後条件
+    /// `Ok` なら `page() == page` かつ `count() == count`。
+    ///
+    /// # エラー
+    /// `page == 0`、または `count` が `1..=100` の外のとき `Semantics`。
     pub fn new(page: u32, count: u8) -> core::result::Result<Self, InvalidValue> {
         let invalid = |why| InvalidValue {
             primitive: Primitive::PageRequest,
@@ -265,17 +353,16 @@ impl PageRequest {
     }
 }
 
-/// One page of a page-numbered list.
+/// ページ番号で区切られたリストの 1 ページ。
 ///
-/// The exchange sends two shapes and both are accepted explicitly:
-/// `{"pagination": {...}, "list": [...]}`, and `{}` for an empty result.
-/// The second is not in the official docs; it is how the production API is
-/// recalled to answer an empty `activeOrders` and must be confirmed against
-/// production before release (see DESIGN.md, open questions). Any other
-/// shape is a `Protocol` error.
+/// 取引所は 2 つの形を送り、どちらも明示的に受け付ける:
+/// `{"pagination": {...}, "list": [...]}` と、空の結果に対する `{}`。
+/// 後者は公式ドキュメントにない。本番 API が空の `activeOrders` にそう答えた
+/// 記憶に基づくもので、リリース前に本番で確かめる必要がある (DESIGN.md の
+/// 未解決事項を参照)。それ以外の形は `Protocol` エラーである。
 ///
-/// # Invariants
-/// `pagination.is_none()` implies `items.is_empty()`.
+/// # 不変条件
+/// `pagination.is_none()` ならば `items.is_empty()`。
 #[derive(Clone, Debug)]
 pub struct Page<T> {
     items: Vec<T>,
@@ -291,24 +378,100 @@ impl<T> Page<T> {
         self.items
     }
 
-    /// `None` exactly when the exchange answered `{}`.
+    /// 取引所が `{}` と答えたときに限り `None`。
     pub fn pagination(&self) -> Option<Pagination> {
         self.pagination
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Pagination {
     pub current_page: u32,
     pub count: u32,
 }
 
 impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for Page<T> {
+    /// `{}` は空のページ。`pagination` と `list` がそろっていればそのページ。
+    /// 片方だけなら形の誤り。他のキーは無視する。
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> core::result::Result<Self, D::Error> {
-        // TODO visitor over a map: no keys => Page { items: vec![], pagination: None };
-        // exactly {pagination, list} (other keys ignored) => Some(..);
-        // only one of the two => error "pagination and list must come together".
-        let _ = d;
-        todo!()
+        #[derive(serde::Deserialize)]
+        #[serde(bound(deserialize = "T: serde::Deserialize<'de>"))]
+        struct Wire<T> {
+            pagination: Option<Pagination>,
+            list: Option<Vec<T>>,
+        }
+        let wire = Wire::<T>::deserialize(d)?;
+        match (wire.pagination, wire.list) {
+            (None, None) => Ok(Page {
+                items: Vec::new(),
+                pagination: None,
+            }),
+            (Some(pagination), Some(items)) => Ok(Page {
+                items,
+                pagination: Some(pagination),
+            }),
+            _ => Err(serde::de::Error::custom(
+                "pagination and list must come together",
+            )),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn page_request_bounds() {
+        assert!(PageRequest::new(0, 10).is_err());
+        assert!(PageRequest::new(1, 0).is_err());
+        assert!(PageRequest::new(1, 101).is_err());
+        let p = PageRequest::new(2, 50).unwrap();
+        assert_eq!((p.page(), p.count()), (2, 50));
+        assert_eq!(p.next().unwrap().page(), 3);
+        assert_eq!(
+            (PageRequest::FIRST.page(), PageRequest::FIRST.count()),
+            (1, 100)
+        );
+    }
+
+    #[test]
+    fn page_accepts_exactly_two_shapes() {
+        let full: Page<u32> =
+            serde_json::from_str(r#"{"pagination":{"currentPage":2,"count":3},"list":[1,2,3]}"#)
+                .unwrap();
+        assert_eq!(full.items(), [1, 2, 3]);
+        assert_eq!(
+            full.pagination(),
+            Some(Pagination {
+                current_page: 2,
+                count: 3
+            })
+        );
+        let empty: Page<u32> = serde_json::from_str("{}").unwrap();
+        assert!(empty.items().is_empty() && empty.pagination().is_none());
+        assert!(serde_json::from_str::<Page<u32>>(r#"{"list":[1]}"#).is_err());
+        assert!(
+            serde_json::from_str::<Page<u32>>(r#"{"pagination":{"currentPage":1,"count":0}}"#)
+                .is_err()
+        );
+        assert!(serde_json::from_str::<Page<u32>>("[]").is_err());
+    }
+
+    #[test]
+    fn call_target_joins_prefix_path_and_query() {
+        let call = Call::new(endpoint!(GET "/v1/trades"))
+            .query("symbol", "BTC")
+            .query("page", 2);
+        assert_eq!(
+            call.target("/public"),
+            "/public/v1/trades?symbol=BTC&page=2"
+        );
+        assert_eq!(
+            Call::new(endpoint!(GET "/v1/status")).target("/public"),
+            "/public/v1/status"
+        );
+        assert_eq!(endpoint!(POST "/v1/order").operation, "POST /v1/order");
     }
 }

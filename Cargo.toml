@@ -19,10 +19,9 @@ tokio-tungstenite = { version = "0.30", default-features = false, features = ["h
 futures-util = { version = "0.3.34", default-features = false, features = ["sink", "std"] }
 ring = "0.17"
 zeroize = { version = "1", default-features = false, features = ["alloc"] }
-httparse = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 
 [dev-dependencies]
-tokio = { version = "1.54", default-features = false, features = ["net", "time", "io-util", "macros", "rt", "rt-multi-thread"] }
+tokio = { version = "1.54", default-features = false, features = ["net", "time", "io-util", "macros", "rt", "rt-multi-thread", "sync"] }
 hyper = { version = "1.12", default-features = false, features = ["client", "http1", "server"] }
