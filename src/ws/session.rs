@@ -35,7 +35,7 @@ use tokio_tungstenite::tungstenite::Message;
 use zeroize::Zeroizing;
 
 use super::{
-    Disconnect, DisconnectReason, FeedChannel, Pacer, PrivateChannel, PrivateEvent, PublicChannel,
+    Disconnect, DisconnectReason, FeedChannel, PrivateChannel, PrivateEvent, PublicChannel,
     PublicEvent,
 };
 use crate::client::{Authenticated, Client, Inner, Limits};
@@ -512,13 +512,6 @@ impl<C: FeedChannel> Session<C> {
 
     pub(crate) fn undesire(&mut self, channel: &C) -> bool {
         self.desired.remove(&channel.key()).is_some()
-    }
-
-    fn pacer(&self) -> &Pacer {
-        match C::API {
-            ApiGroup::PrivateWs => &self.inner.private_ws_pacer,
-            _ => &self.inner.public_ws_pacer,
-        }
     }
 
     /// 契約は `Feed::next` を参照。
