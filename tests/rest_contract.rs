@@ -347,10 +347,15 @@ async fn a_non_envelope_404_is_a_protocol_error_with_the_status() {
 
     let err = mock.client().status().await.expect_err("404");
 
-    match err {
+    match &err {
         Error::Protocol(p) => assert_eq!(p.kind(), &ProtocolErrorKind::HttpStatus(404)),
         other => panic!("{other:?}"),
     }
+    assert!(
+        !err.outcome_unknown(),
+        "a GET changes nothing, so there is no outcome to doubt"
+    );
+    assert!(!err.accepted_but_unreadable());
 }
 
 #[tokio::test]

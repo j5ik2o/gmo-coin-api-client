@@ -15,11 +15,17 @@
 //!
 //! すべての REST メソッドは次の共通集合で失敗し得る。各メソッド自身の
 //! `# エラー` 節は、そのメソッドに固有のものだけを加える。
-//! - `Transport`: 完全な答えがない。お金を動かすものを再送する前に
-//!   `Error::outcome_unknown` を確かめること。
+//! - `Transport`: 完全な答えがない。
 //! - `Protocol`: 文書化された形でない答え (フェイルクローズド)。
 //! - `Api`: `status != 0`。たとえば ERR-5003 (`Error::is_rate_limited`)、
 //!   ERR-5201/5202 (メンテナンス)、ERR-5008/5009 (ローカル時計のずれ)。
+//!
+//! 状態を変える呼び出し (GET 以外) では、`Transport` と `Protocol` のどちらも
+//! 「取引所が適用したかもしれない」を意味し得る。再送や照会の前に
+//! [`Error::outcome_unknown`] を見ること。`status == 0` は読めたが `data` が
+//! 読めなかった、または事後条件に反したときは [`Error::accepted_but_unreadable`]
+//! も真で、適用されたことは確定している。`Api` は取引所が拒否した答えなので
+//! 適用されていない。
 //!
 //! 各メソッドの本体は同じ 4 段階である。型では表せない事前条件を検査し、
 //! `Call` を組み立て、送り (エンベロープは `Client::send` の中で一度だけ検査
@@ -472,5 +478,21 @@ mod tests {
             "/public/v1/status"
         );
         assert_eq!(endpoint!(POST "/v1/order").operation, "POST /v1/order");
+    }
+
+    /// `Error::outcome_unknown` は操作名の先頭の語をメソッドとして読む。
+    #[test]
+    fn operation_starts_with_its_method() {
+        for endpoint in [
+            endpoint!(GET "/v1/x"),
+            endpoint!(POST "/v1/x"),
+            endpoint!(PUT "/v1/x"),
+            endpoint!(DELETE "/v1/x"),
+        ] {
+            assert_eq!(
+                endpoint.operation,
+                format!("{} /v1/x", endpoint.method.as_str())
+            );
+        }
     }
 }

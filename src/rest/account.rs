@@ -484,6 +484,10 @@ impl Client<Authenticated> {
     ///
     /// # エラー
     /// [REST 共通の集合](crate::rest#エラー)。振替可能額を超えると ERR-754。
+    /// この操作には `client_order_id` のような冪等キーがない。`outcome_unknown()`
+    /// のとき再送すると二度振り替わり得るので、再送しない。先に `margin()` の
+    /// `transferable_amount` か履歴系のエンドポイントで残高を照合する。
+    /// `accepted_but_unreadable()` なら振替は済んでいて、額だけが読めなかった。
     ///
     /// # 例
     /// ```no_run

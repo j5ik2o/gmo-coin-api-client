@@ -281,13 +281,17 @@ async fn transfer_requires_exactly_one_entry_in_the_answer() {
             .await
             .expect_err("not exactly one entry");
 
-        match err {
+        match &err {
             Error::Protocol(p) => assert_eq!(
                 p.kind(),
                 &ProtocolErrorKind::Postcondition(Postcondition::ExpectedOneEntry { actual })
             ),
             other => panic!("expected a postcondition failure, got {other:?}"),
         }
+        assert!(
+            err.outcome_unknown() && err.accepted_but_unreadable(),
+            "status 0 means the transfer went through; the amount is unknown: {err:?}"
+        );
     }
 }
 

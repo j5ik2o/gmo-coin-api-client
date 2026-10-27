@@ -479,14 +479,19 @@ impl Client<Authenticated> {
     /// - `Contract(..)`: 事前条件の違反。何も送られていない。
     /// - `Api` の ERR-915: `client_order_id` が使用済み。注文は存在するので、
     ///   `OrderLookup::ByClientOrderIds` で調べる。
-    /// - `Transport` で `outcome_unknown() == true`: 同じ `NewOrder`
-    ///   (同じ `client_order_id`) を再送する。発注されるのは高々一度である。
+    /// - `outcome_unknown() == true` (`Transport` の `MaybeSent`、または答えを
+    ///   読めなかった `Protocol`): 同じ `NewOrder` (同じ `client_order_id`) を
+    ///   再送する。発注されるのは高々一度で、最初の試行が発注されていれば
+    ///   再送は ERR-915 で拒否される。`accepted_but_unreadable()` も真なら
+    ///   発注は確定しているので、再送せずに照会してよい。
     ///
     /// # 例
+    /// 結果不明なら同じ注文を再送し、ERR-915 なら顧客注文 ID で照会する。
     /// ```no_run
-    /// # async fn run(client: gmo_coin_api_client::Client<gmo_coin_api_client::Authenticated>) -> gmo_coin_api_client::Result<()> {
-    /// use gmo_coin_api_client::{ClientOrderId, LimitTimeInForce, OrderPrice, OrderSize, Side, Symbol};
-    /// use gmo_coin_api_client::rest::{NewOrder, OrderExecution};
+    /// # async fn run(client: gmo_coin_api_client::Client<gmo_coin_api_client::Authenticated>) -> Result<(), Box<dyn std::error::Error>> {
+    /// use gmo_coin_api_client::error::ErrorCode;
+    /// use gmo_coin_api_client::rest::{NewOrder, OrderExecution, OrderLookup};
+    /// use gmo_coin_api_client::{Batch, ClientOrderId, Error, LimitTimeInForce, OrderPrice, OrderSize, Side, Symbol};
     /// let order = NewOrder {
     ///     client_order_id: ClientOrderId::generate(),
     ///     symbol: Symbol::BTC,
@@ -499,8 +504,17 @@ impl Client<Authenticated> {
     ///     },
     /// };
     /// let id = match client.place_order(&order).await {
-    ///     Err(e) if e.outcome_unknown() => client.place_order(&order).await?,
-    ///     other => other?,
+    ///     Ok(id) => id,
+    ///     Err(e) if e.outcome_unknown() => match client.place_order(&order).await {
+    ///         Ok(id) => id,
+    ///         Err(Error::Api(api)) if api.has(ErrorCode::CLIENT_ORDER_ID_USED) => {
+    ///             let lookup = OrderLookup::ByClientOrderIds(Batch::one(order.client_order_id.clone()));
+    ///             let orders = client.orders(&lookup).await?;
+    ///             orders.first().ok_or("ERR-915 なのに注文が照会できない")?.order_id
+    ///         }
+    ///         Err(e) => return Err(e.into()),
+    ///     },
+    ///     Err(e) => return Err(e.into()),
     /// };
     /// println!("{id}");
     /// # Ok(()) }
@@ -564,6 +578,8 @@ impl Client<Authenticated> {
     ///
     /// # エラー
     /// [REST 共通の集合](crate::rest#エラー)。注文がもう取り消せないとき ERR-5122。
+    /// `outcome_unknown()` なら取消は受け付けられたかもしれない。同じ id で
+    /// 再送してよい。取消済みの注文には ERR-5122 が返るだけで害はない。
     ///
     /// # 例
     /// ```no_run
@@ -593,7 +609,10 @@ impl Client<Authenticated> {
     /// 送ったのに結果に現れなかった id は `unaccounted()` に入る。
     ///
     /// # エラー
-    /// [REST 共通の集合](crate::rest#エラー)。
+    /// [REST 共通の集合](crate::rest#エラー)。`outcome_unknown()` なら、どの id が
+    /// 取り消されたかは分からない。同じバッチを再送するか、`orders` で調べる。
+    /// 事後条件違反 (`accepted_but_unreadable()`) は取引所が取消を処理した後
+    /// なので、`orders` で調べる。
     ///
     /// # 例
     /// ```no_run
@@ -637,7 +656,8 @@ impl Client<Authenticated> {
     ///
     /// # エラー
     /// `Contract`: `symbols` が空。リクエストは作られない。ほかは
-    /// [REST 共通の集合](crate::rest#エラー)。
+    /// [REST 共通の集合](crate::rest#エラー)。`outcome_unknown()` なら、取り消された
+    /// id は分からない。`active_orders` で残りを調べてから再送する。
     ///
     /// # 例
     /// ```no_run
@@ -675,6 +695,8 @@ impl Client<Authenticated> {
     /// `Contract`: 現物銘柄。リクエストは作られない。ほかは
     /// [REST 共通の集合](crate::rest#エラー)。決済する側が違うとき ERR-70、
     /// 建玉が存在しないとき ERR-254、`client_order_id` の再利用で ERR-915。
+    /// `outcome_unknown()` のときは `place_order` と同じ手順: 同じ
+    /// `client_order_id` で再送し、ERR-915 なら `orders` で照会する。
     ///
     /// # 例
     /// ```no_run
@@ -709,7 +731,9 @@ impl Client<Authenticated> {
     ///
     /// # エラー
     /// `Contract`: 現物銘柄。リクエストは作られない。ほかは
-    /// [REST 共通の集合](crate::rest#エラー)。
+    /// [REST 共通の集合](crate::rest#エラー)。`outcome_unknown()` のときは
+    /// `place_order` と同じ手順: 同じ `client_order_id` で再送し、ERR-915 なら
+    /// `orders` で照会する。
     ///
     /// # 例
     /// ```no_run

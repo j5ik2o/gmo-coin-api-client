@@ -566,9 +566,67 @@ async fn a_non_numeric_order_id_in_the_answer_is_a_protocol_error() {
         .expect_err("bad id");
 
     assert!(matches!(
-        err,
+        &err,
         Error::Protocol(p) if matches!(p.kind(), ProtocolErrorKind::Shape { .. })
     ));
+    assert!(
+        err.accepted_but_unreadable(),
+        "status 0 means the order exists; only its id was lost: {err:?}"
+    );
+    assert!(err.outcome_unknown(), "{err:?}");
+}
+
+#[tokio::test]
+async fn a_gateway_error_after_a_post_leaves_the_order_outcome_unknown() {
+    let mock = MockExchange::start().await;
+    mock.on("POST", "/private/v1/order").reply(Reply::Status {
+        code: 502,
+        body: "<html>bad gateway</html>".to_owned(),
+    });
+
+    let err = authed(&mock)
+        .place_order(&limit_buy(Symbol::BTC))
+        .await
+        .expect_err("502");
+
+    assert!(matches!(
+        &err,
+        Error::Protocol(p) if *p.kind() == ProtocolErrorKind::HttpStatus(502)
+    ));
+    assert!(
+        err.outcome_unknown(),
+        "a gateway answered, the exchange may still have placed the order: {err:?}"
+    );
+    assert!(
+        !err.accepted_but_unreadable(),
+        "nothing says it was accepted"
+    );
+}
+
+#[tokio::test]
+async fn a_success_envelope_without_data_after_a_post_is_accepted_but_unreadable() {
+    let mock = MockExchange::start().await;
+    mock.on("POST", "/private/v1/closeOrder")
+        .reply(Reply::Json(r#"{"status":0}"#.to_owned()));
+
+    let err = authed(&mock)
+        .close_position(&ClosePosition {
+            client_order_id: cid("close1"),
+            symbol: Symbol::BTC_JPY,
+            side: Side::Sell,
+            position_id: PositionId::new(1234567).unwrap(),
+            size: size("0.1"),
+            execution: CloseExecution::Market,
+        })
+        .await
+        .expect_err("no data");
+
+    assert!(matches!(
+        &err,
+        Error::Protocol(p) if *p.kind() == ProtocolErrorKind::MissingData
+    ));
+    assert!(err.accepted_but_unreadable(), "{err:?}");
+    assert!(err.outcome_unknown(), "{err:?}");
 }
 
 #[tokio::test]
@@ -664,10 +722,15 @@ async fn cancel_orders_rejects_an_id_reported_twice() {
     let err = authed(&mock).cancel_orders(&sent).await.expect_err("twice");
 
     assert!(matches!(
-        err,
+        &err,
         Error::Protocol(p) if p.kind()
             == &ProtocolErrorKind::Postcondition(Postcondition::CancelResultIdRepeated(oid(3)))
     ));
+    assert!(
+        err.outcome_unknown(),
+        "the exchange accepted the cancel; which ids it took is unknown: {err:?}"
+    );
+    assert!(err.accepted_but_unreadable(), "{err:?}");
 }
 
 #[tokio::test]

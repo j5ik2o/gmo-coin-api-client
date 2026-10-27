@@ -2,13 +2,16 @@
 //!
 //! すべての variant は「誰の責任か」と「何かが送られたか」に答える。
 //!
-//! | variant      | 責任                       | リクエストは送られたか     |
-//! |--------------|----------------------------|----------------------------|
-//! | `Contract`   | 呼び出し側の入力           | 決して送られない           |
-//! | `Api`        | 取引所が拒否した           | 送られ、処理された         |
-//! | `Protocol`   | 取引所が形を破った         | 送られた                   |
-//! | `Transport`  | ネットワーク、TLS、上限    | [`Delivery`] を参照        |
-//! | `FeedClosed` | フィードは既に終了         | 該当しない                 |
+//! | variant      | 責任                       | リクエストは送られたか     | 適用されたか                         |
+//! |--------------|----------------------------|----------------------------|--------------------------------------|
+//! | `Contract`   | 呼び出し側の入力           | 決して送られない           | いいえ                               |
+//! | `Api`        | 取引所が拒否した           | 送られ、処理された         | いいえ                               |
+//! | `Protocol`   | 取引所が形を破った         | 送られた                   | 不明 ([`Error::outcome_unknown`])    |
+//! | `Transport`  | ネットワーク、TLS、上限    | [`Delivery`] を参照        | `MaybeSent` なら不明                 |
+//! | `FeedClosed` | フィードは既に終了         | 該当しない                 | 該当しない                           |
+//!
+//! 「適用されたか」は GET 以外の REST 呼び出しについての問いである。答えは
+//! [`Error::outcome_unknown`] と [`Error::accepted_but_unreadable`] が返す。
 //!
 //! 秘匿は構造によって保証される。エラーが持つのは `&'static str` の操作名
 //! (`"POST /v1/order"`)、`ApiGroup`、数値コード、`io::ErrorKind` だけである。
@@ -50,8 +53,31 @@ impl Error {
     /// 状態を変えるリクエストが効いたかどうか分からない。注文なら同じ
     /// `ClientOrderId` で再送する。ERR-915 が返れば最初の試行は発注されて
     /// おり、`orders(OrderLookup::ByClientOrderIds)` がそれを返す。
+    ///
+    /// 真になるのは次の 2 つである。
+    /// - `Transport` で [`Delivery::MaybeSent`]: 書き込みが始まった後に失敗した
+    ///   (GET でも真になる。これは送られた事実の記録である)。
+    /// - GET 以外の REST 呼び出しの後の `Protocol`: 答えは届いたが読めなかった。
+    ///   ゲートウェイの 502、エンベロープでない本文、`status == 0` なのに
+    ///   `data` が読めない、事後条件違反。どれも取引所が適用した可能性がある。
+    ///   `status == 0` を読めた場合は [`Error::accepted_but_unreadable`] も真で、
+    ///   適用されたことは確定している。
+    ///
+    /// `Api` (取引所が拒否した) と `Contract` (送っていない) では偽。
     pub fn outcome_unknown(&self) -> bool {
-        matches!(self, Error::Transport(t) if t.delivery == Delivery::MaybeSent)
+        match self {
+            Error::Transport(t) => t.delivery == Delivery::MaybeSent,
+            Error::Protocol(p) => p.after_state_change(),
+            Error::Contract(_) | Error::Api(_) | Error::FeedClosed => false,
+        }
+    }
+
+    /// 取引所は `status == 0` で受け付けたが、答え (`data`) を読めなかった。
+    /// リクエストは適用されている。注文なら発注済みで、`OrderId` だけが
+    /// 失われたので、`orders(OrderLookup::ByClientOrderIds)` で引く。再送は
+    /// 不要で、しても ERR-915 が返るだけである。`outcome_unknown` も真になる。
+    pub fn accepted_but_unreadable(&self) -> bool {
+        matches!(self, Error::Protocol(p) if p.kind.after_acceptance())
     }
 }
 
@@ -288,6 +314,15 @@ impl ProtocolError {
     pub fn kind(&self) -> &ProtocolErrorKind {
         &self.kind
     }
+
+    /// GET 以外の REST 呼び出しの後に起きたか。`operation` は `endpoint!` が
+    /// メソッド名と空白とパスから組み立てるので、先頭の語がメソッドである
+    /// (`rest` のテスト `operation_starts_with_its_method` が固定している)。
+    /// WebSocket の操作名はこの形でないので `api` で除く。
+    fn after_state_change(&self) -> bool {
+        matches!(self.api, ApiGroup::PublicRest | ApiGroup::PrivateRest)
+            && !self.operation.starts_with("GET ")
+    }
 }
 
 impl fmt::Display for ProtocolError {
@@ -349,6 +384,19 @@ pub enum ProtocolErrorKind {
     WsHandshake { http_status: u16 },
     /// 購読中のチャネルの WebSocket テキストメッセージがデコードできなかった。
     WsMessage { line: usize, column: usize },
+}
+
+impl ProtocolErrorKind {
+    /// `status == 0` のエンベロープを受け取った後にしか起きない種類か。
+    /// これらは `Answer` (成功エンベロープ) からしか作られない。
+    fn after_acceptance(&self) -> bool {
+        matches!(
+            self,
+            ProtocolErrorKind::MissingData
+                | ProtocolErrorKind::Shape { .. }
+                | ProtocolErrorKind::Postcondition(_)
+        )
+    }
 }
 
 /// 名前付きの事後条件。テストと呼び出し側が正確な規則で照合できる。
@@ -531,8 +579,49 @@ mod tests {
         });
         assert!(api.is_rate_limited());
         assert!(!api.outcome_unknown());
+        assert!(!api.accepted_but_unreadable());
         let text = api.to_string();
         assert!(text.contains("GET /v1/status") && text.contains("ERR-5003"));
+
+        let protocol = |api, operation, kind| {
+            Error::Protocol(ProtocolError {
+                api,
+                operation,
+                kind,
+            })
+        };
+        let post_gateway = protocol(
+            ApiGroup::PrivateRest,
+            "POST /v1/order",
+            ProtocolErrorKind::HttpStatus(502),
+        );
+        assert!(post_gateway.outcome_unknown());
+        assert!(!post_gateway.accepted_but_unreadable());
+        let post_unreadable = protocol(
+            ApiGroup::PrivateRest,
+            "POST /v1/order",
+            ProtocolErrorKind::Shape { line: 1, column: 1 },
+        );
+        assert!(post_unreadable.outcome_unknown());
+        assert!(post_unreadable.accepted_but_unreadable());
+        let delete_missing = protocol(
+            ApiGroup::PrivateRest,
+            "DELETE /v1/ws-auth",
+            ProtocolErrorKind::MissingData,
+        );
+        assert!(delete_missing.outcome_unknown() && delete_missing.accepted_but_unreadable());
+        let get_gateway = protocol(
+            ApiGroup::PublicRest,
+            "GET /v1/status",
+            ProtocolErrorKind::HttpStatus(502),
+        );
+        assert!(!get_gateway.outcome_unknown());
+        let ws = protocol(
+            ApiGroup::PrivateWs,
+            "/v1",
+            ProtocolErrorKind::WsHandshake { http_status: 503 },
+        );
+        assert!(!ws.outcome_unknown() && !ws.accepted_but_unreadable());
 
         let unknown = Error::Transport(TransportError {
             api: ApiGroup::PrivateRest,
