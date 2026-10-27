@@ -32,6 +32,12 @@ pub struct Hub {
     pub handshakes: Vec<(u64, Api)>,
     next_id: u64,
     maintenance: bool,
+    /// `(api, channel, error text)`。一致する subscribe は記録した上で
+    /// `{"error": text}` で答える。
+    rejections: Vec<(Api, String, String)>,
+    /// `Some(status)` の間、Private のハンドシェイクをトークンに関係なく
+    /// その HTTP 状態で拒否する。
+    reject_private: Option<u16>,
 }
 
 struct Conn {
@@ -174,6 +180,21 @@ impl WsControl {
     pub fn set_maintenance(&self, on: bool) {
         self.lock().ws.maintenance = on;
     }
+
+    /// 以後、`api` で `channel` への subscribe が届くたびに、記録した上で
+    /// `{"error": text}` を返す。本番で観測した拒否の形と同じ。
+    pub fn reject_subscribe(&self, api: Api, channel: &str, text: &str) {
+        self.lock()
+            .ws
+            .rejections
+            .push((api, channel.to_owned(), text.to_owned()));
+    }
+
+    /// `Some(status)` の間、Private のハンドシェイクをトークンの生死に
+    /// 関係なくその HTTP 状態で拒否する。`None` で元に戻す。
+    pub fn reject_private_handshakes(&self, status: Option<u16>) {
+        self.lock().ws.reject_private = status;
+    }
 }
 
 /// アップグレード要求を 1 本処理する。
@@ -196,7 +217,9 @@ pub async fn serve(socket: TcpStream, state: Arc<Mutex<State>>) {
             api = Some(Api::Public);
             Ok(resp)
         } else if let Some(token) = path.strip_prefix("/ws/private/v1/") {
-            if st.tokens.is_live(token) {
+            if let Some(status) = st.ws.reject_private {
+                reject(status)
+            } else if st.tokens.is_live(token) {
                 api = Some(Api::Private);
                 Ok(resp)
             } else {
@@ -224,7 +247,17 @@ pub async fn serve(socket: TcpStream, state: Arc<Mutex<State>>) {
             inbound = ws.next() => match inbound {
                 Some(Ok(Message::Text(text))) => {
                     if let Ok(value) = serde_json::from_str::<Value>(&text) {
-                        state.lock().unwrap_or_else(|e| e.into_inner()).ws.commands.push((Instant::now(), api, id, value));
+                        let rejection = {
+                            let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
+                            let rejection = st.ws.rejections.iter().find(|(a, channel, _)| {
+                                *a == api && value["command"] == "subscribe" && value["channel"] == channel.as_str()
+                            }).map(|(_, _, text)| serde_json::json!({"error": text}).to_string());
+                            st.ws.commands.push((Instant::now(), api, id, value));
+                            rejection
+                        };
+                        if let Some(reply) = rejection && ws.send(Message::text(reply)).await.is_err() {
+                            break;
+                        }
                     }
                 }
                 Some(Ok(Message::Pong(_))) => state.lock().unwrap_or_else(|e| e.into_inner()).ws.pongs += 1,

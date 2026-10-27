@@ -453,9 +453,10 @@ async fn a_flushed_command_followed_by_silence_does_not_trip_the_write_deadline(
 }
 
 /// 本番で観測した拒否の形 (`tests/fixtures/live/ws_public_error.json`) は
-/// `Rejected` になり、本文はサーバが送ったままである。フィードは閉じない。
+/// `Rejected` になり、本文はサーバが送ったままである。拒否は返答待ちの
+/// コマンド (ETH の subscribe) に帰属し、裏付け済みの BTC は流れ続ける。
 #[tokio::test]
-async fn a_server_rejection_is_yielded_with_its_text_and_the_feed_stays_open() {
+async fn a_server_rejection_names_the_command_in_flight_and_the_feed_stays_open() {
     let mock = MockExchange::start().await;
     let ws = mock.ws();
     let mut feed = fast_client(&mock, |_| {}).public_feed();
@@ -467,10 +468,22 @@ async fn a_server_rejection_is_yielded_with_its_text_and_the_feed_stays_open() {
     });
     ws.subscribed(Api::Public, "ticker", Some("BTC"), WAIT)
         .await;
+    ws.push(Api::Public, &fixture("ws_public_ticker.json"));
+    let (mut feed, event) = driver.await.unwrap();
+    assert!(matches!(event, Ok(PublicEvent::Ticker(_))), "{event:?}");
+
+    feed.subscribe(PublicChannel::Ticker(Symbol::ETH)).unwrap();
+    let driver = tokio::spawn(async move {
+        let event = feed.next().await;
+        (feed, event)
+    });
+    ws.subscribed(Api::Public, "ticker", Some("ETH"), WAIT)
+        .await;
     ws.push(Api::Public, &fixture("live/ws_public_error.json"));
     let (mut feed, event) = driver.await.unwrap();
     match event.unwrap() {
-        PublicEvent::Rejected(text) => {
+        PublicEvent::Rejected { channel, text } => {
+            assert_eq!(channel, Some(PublicChannel::Ticker(Symbol::ETH)));
             assert_eq!(&*text, "ERR-5106 Invalid request parameter. channel");
         }
         other => panic!("{other:?}"),
@@ -483,5 +496,81 @@ async fn a_server_rejection_is_yielded_with_its_text_and_the_feed_stays_open() {
     ws.push(Api::Public, &fixture("ws_public_ticker.json"));
     let (feed, event) = driver.await.unwrap();
     assert!(matches!(event, Ok(PublicEvent::Ticker(_))), "{event:?}");
+    feed.close().await.unwrap();
+}
+
+/// 拒否された subscribe は望ましい集合から外れる: 再接続しても送り直さず、
+/// 呼び出し側が `subscribe` をもう一度呼んだときだけ送り直す。
+#[tokio::test]
+async fn a_rejected_subscribe_is_dropped_until_the_caller_subscribes_again() {
+    let mock = MockExchange::start().await;
+    let ws = mock.ws();
+    ws.reject_subscribe(
+        Api::Private,
+        "orderEvents",
+        "ERR-5106 Invalid request parameter. channel",
+    );
+    let client = fast_client(&mock, |_| {}).authenticate(MockExchange::credentials());
+    let mut feed = client.private_feed();
+    feed.subscribe(PrivateChannel::ExecutionEvents).unwrap();
+
+    let driver = tokio::spawn(async move {
+        let event = feed.next().await;
+        (feed, event)
+    });
+    ws.subscribed(Api::Private, "executionEvents", None, WAIT)
+        .await;
+    ws.push(Api::Private, &fixture("ws_private_executionEvents.json"));
+    let (mut feed, event) = driver.await.unwrap();
+    assert!(matches!(event, Ok(PrivateEvent::Execution(_))), "{event:?}");
+
+    feed.subscribe(PrivateChannel::OrderEvents).unwrap();
+    match feed.next().await.unwrap() {
+        PrivateEvent::Rejected { channel, text } => {
+            assert_eq!(channel, Some(PrivateChannel::OrderEvents));
+            assert_eq!(&*text, "ERR-5106 Invalid request parameter. channel");
+        }
+        other => panic!("{other:?}"),
+    }
+
+    ws.drop_connections(Api::Private);
+    assert!(matches!(
+        feed.next().await,
+        Ok(PrivateEvent::Disconnected(_))
+    ));
+    assert!(matches!(feed.next().await, Ok(PrivateEvent::Reconnected)));
+    let driver = tokio::spawn(async move {
+        let event = feed.next().await;
+        (feed, event)
+    });
+    ws.subscribed(Api::Private, "executionEvents", None, WAIT)
+        .await;
+    ws.push(Api::Private, &fixture("ws_private_executionEvents.json"));
+    let (mut feed, event) = driver.await.unwrap();
+    assert!(matches!(event, Ok(PrivateEvent::Execution(_))), "{event:?}");
+    let order_subscribes = |ws: &support::WsControl| {
+        ws.commands()
+            .iter()
+            .filter(|(_, _, c)| c["command"] == "subscribe" && c["channel"] == "orderEvents")
+            .count()
+    };
+    assert_eq!(
+        order_subscribes(&ws),
+        1,
+        "the reconnect did not replay the rejected subscribe"
+    );
+
+    feed.subscribe(PrivateChannel::OrderEvents).unwrap();
+    match feed.next().await.unwrap() {
+        PrivateEvent::Rejected { channel, .. } => {
+            assert_eq!(channel, Some(PrivateChannel::OrderEvents));
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        order_subscribes(&ws),
+        2,
+        "a fresh subscribe call sends the command again"
+    );
     feed.close().await.unwrap();
 }

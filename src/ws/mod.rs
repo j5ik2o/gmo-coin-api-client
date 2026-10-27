@@ -79,9 +79,27 @@ pub enum PublicEvent {
     /// 新しい接続が上がり、購読が再生されつつある。切断中に送られた
     /// メッセージは失われている: REST で同期し直すこと。
     Reconnected,
-    /// サーバがコマンドを拒否した。本文はサーバが送ったままの文章
-    /// (たとえば別プロセスからの subscribe で IP ごとの上限を超えた場合)。
-    Rejected(Box<str>),
+    /// サーバがコマンドを拒否した。
+    ///
+    /// `channel` は、この接続に最後に書いたコマンドのチャネルである (まだ
+    /// データイベントで裏付けられていないもの)。コマンドは 1 秒に 1 つしか
+    /// 送らないので、拒否が届いた時点で返答待ちのコマンドは高々 1 つという
+    /// 前提に立つ。裏付け済みのコマンドしかない、またはサーバが自発的に
+    /// 送った拒否なら `None`。
+    ///
+    /// 拒否されたのが subscribe なら、そのチャネルは望ましい集合から外れる。
+    /// 再接続が同じ拒否を繰り返すことはなく、もう一度 `subscribe` を呼べば
+    /// 送り直す。unsubscribe の拒否は集合を変えない。
+    ///
+    /// `text` はサーバが送ったままの文章 (たとえば別プロセスからの
+    /// subscribe で IP ごとの上限を超えた場合)。512 バイトを超える分は
+    /// 文字境界で切り捨てる。REST のメッセージと違い `Protocol` エラーには
+    /// しない。文章の長さはモデルの不一致ではなく、フィードを閉じる理由に
+    /// ならないからである。
+    Rejected {
+        channel: Option<PublicChannel>,
+        text: Box<str>,
+    },
 }
 
 /// Private フィードのイベント。
@@ -96,7 +114,11 @@ pub enum PrivateEvent {
     /// `latest_executions` と `active_orders` を呼ぶこと。
     Disconnected(Disconnect),
     Reconnected,
-    Rejected(Box<str>),
+    /// [`PublicEvent::Rejected`] と同じ規則。
+    Rejected {
+        channel: Option<PrivateChannel>,
+        text: Box<str>,
+    },
 }
 
 /// 接続が落ちた理由と、次の試行がいつ始まるか。

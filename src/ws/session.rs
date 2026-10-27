@@ -14,8 +14,9 @@
 //! ```
 //!
 //! # 不変条件
-//! - `Connected` の間、`sent.subscribed` はこの接続に書き込みを始めた
-//!   コマンドの集合と等しい。再接続のたびに空から始まる。
+//! - `Connected` の間、`sent.subscribed` はこの接続に書き込みを始め、
+//!   サーバに拒否されていない subscribe の集合と等しい。再接続のたびに
+//!   空から始まる。
 //! - `Connected` の間、取得済みのペーサのスロットは高々 1 つで、コマンドを
 //!   書くか、書くべきコマンドがなくなるまで `Connection::slot` に残る。
 //! - Private の `TokenLease` は `extend_at <= expires_at` を保ち、どちらも
@@ -68,16 +69,25 @@ pub(crate) mod codec {
         /// # エラー
         /// `channel` が既知のチャネルを指すのにペイロードが一致しないとき
         /// `WsMessage` (フェイルクローズド)。`error` フィールドを持つ
-        /// メッセージは `Rejected` になる。それ以外の形も `WsMessage`。
-        fn decode(text: &str) -> core::result::Result<Self::Event, ProtocolErrorKind>;
+        /// メッセージは `Decoded::Rejected` になる。それ以外の形も `WsMessage`。
+        fn decode(text: &str) -> core::result::Result<Decoded<Self::Event>, ProtocolErrorKind>;
         /// データイベントのキー。`Disconnected`、`Reconnected`、`Rejected` は `None`。
         fn event_key(event: &Self::Event) -> Option<Self::Key>;
         fn disconnected(d: Disconnect) -> Self::Event;
         fn reconnected() -> Self::Event;
+        fn rejected(channel: Option<Self>, text: Box<str>) -> Self::Event;
+    }
+
+    /// デコードの結果。拒否はチャネルを持たない: どのコマンドへの返答かは
+    /// セッションがこの接続に最後に書いたコマンドから決める。
+    #[derive(Debug)]
+    pub enum Decoded<E> {
+        Event(E),
+        Rejected(Box<str>),
     }
 }
 
-use codec::Codec;
+use codec::{Codec, Decoded};
 
 /// subscribe / unsubscribe コマンドの本文。
 #[derive(Serialize)]
@@ -126,12 +136,18 @@ fn payload<T: DeserializeOwned>(text: &str) -> core::result::Result<T, ProtocolE
     serde_json::from_str(text).map_err(|e| ws_message(&e))
 }
 
+/// 拒否文の上限。REST の `ApiMessage::text` と同じ 512 バイト。
+const MAX_REJECTION_BYTES: usize = 512;
+
 /// サーバの拒否文。文字列ならそのまま、それ以外の JSON 値ならその表記。
+/// `MAX_REJECTION_BYTES` を超える分は文字境界で切り捨てる。
 fn rejection(error: serde_json::Value) -> Box<str> {
-    match error {
-        serde_json::Value::String(text) => text.into_boxed_str(),
-        other => other.to_string().into_boxed_str(),
-    }
+    let mut text = match error {
+        serde_json::Value::String(text) => text,
+        other => other.to_string(),
+    };
+    text.truncate(text.floor_char_boundary(MAX_REJECTION_BYTES));
+    text.into_boxed_str()
 }
 
 /// 既知のチャネル名を持たないメッセージ。位置は先頭を指す。
@@ -164,10 +180,10 @@ impl Codec for PublicChannel {
         }
         .render()
     }
-    fn decode(text: &str) -> core::result::Result<PublicEvent, ProtocolErrorKind> {
+    fn decode(text: &str) -> core::result::Result<Decoded<PublicEvent>, ProtocolErrorKind> {
         let head = head(text)?;
         if let Some(error) = head.error {
-            return Ok(PublicEvent::Rejected(rejection(error)));
+            return Ok(Decoded::Rejected(rejection(error)));
         }
         match head.channel.as_deref() {
             Some("ticker") => payload(text).map(PublicEvent::Ticker),
@@ -175,6 +191,7 @@ impl Codec for PublicChannel {
             Some("trades") => payload(text).map(PublicEvent::Trade),
             _ => Err(UNKNOWN_SHAPE),
         }
+        .map(Decoded::Event)
     }
     fn event_key(event: &PublicEvent) -> Option<Self::Key> {
         match event {
@@ -189,6 +206,9 @@ impl Codec for PublicChannel {
     }
     fn reconnected() -> PublicEvent {
         PublicEvent::Reconnected
+    }
+    fn rejected(channel: Option<Self>, text: Box<str>) -> PublicEvent {
+        PublicEvent::Rejected { channel, text }
     }
 }
 
@@ -221,10 +241,10 @@ impl Codec for PrivateChannel {
         }
         .render()
     }
-    fn decode(text: &str) -> core::result::Result<PrivateEvent, ProtocolErrorKind> {
+    fn decode(text: &str) -> core::result::Result<Decoded<PrivateEvent>, ProtocolErrorKind> {
         let head = head(text)?;
         if let Some(error) = head.error {
-            return Ok(PrivateEvent::Rejected(rejection(error)));
+            return Ok(Decoded::Rejected(rejection(error)));
         }
         match head.channel.as_deref() {
             Some("executionEvents") => payload(text).map(PrivateEvent::Execution),
@@ -233,6 +253,7 @@ impl Codec for PrivateChannel {
             Some("positionSummaryEvents") => payload(text).map(PrivateEvent::PositionSummary),
             _ => Err(UNKNOWN_SHAPE),
         }
+        .map(Decoded::Event)
     }
     fn event_key(event: &PrivateEvent) -> Option<u8> {
         match event {
@@ -248,6 +269,9 @@ impl Codec for PrivateChannel {
     }
     fn reconnected() -> PrivateEvent {
         PrivateEvent::Reconnected
+    }
+    fn rejected(channel: Option<Self>, text: Box<str>) -> PrivateEvent {
+        PrivateEvent::Rejected { channel, text }
     }
 }
 
@@ -358,6 +382,52 @@ enum State<C: FeedChannel> {
 /// 再接続で望ましい集合を再生する仕組みである。
 struct Sent<C: FeedChannel> {
     subscribed: BTreeMap<<C as Codec>::Key, C>,
+    /// 最後に書いたコマンドのうち、まだ返答で裏付けられていないもの。
+    /// サーバの拒否はこれに帰属する。subscribe はそのキーの最初のデータ
+    /// イベントで裏付けられ、拒否は 1 つのコマンドにしか帰属しない。
+    last: Option<Written<C>>,
+}
+
+impl<C: FeedChannel> Sent<C> {
+    fn empty() -> Self {
+        Self {
+            subscribed: BTreeMap::new(),
+            last: None,
+        }
+    }
+
+    /// `channel` の最初のデータイベントが届いた: その subscribe は通った。
+    fn confirmed(&mut self, key: &<C as Codec>::Key) {
+        if self
+            .last
+            .as_ref()
+            .is_some_and(|w| w.subscribe && w.channel.key() == *key)
+        {
+            self.last = None;
+        }
+    }
+
+    /// 拒否を最後のコマンドに帰属させ、拒否された subscribe を取り消す。
+    /// `desired` からは、そのキーがまだ同じチャネルを望んでいるときだけ
+    /// 外す。別のオプションで望み直した subscribe はまだ送っていない
+    /// 別のコマンドだからである。
+    fn rejected(&mut self, desired: &mut BTreeMap<<C as Codec>::Key, C>) -> Option<C> {
+        let written = self.last.take()?;
+        if written.subscribe {
+            let key = written.channel.key();
+            self.subscribed.remove(&key);
+            if desired.get(&key) == Some(&written.channel) {
+                desired.remove(&key);
+            }
+        }
+        Some(written.channel)
+    }
+}
+
+/// この接続に書いた 1 つのコマンド。
+struct Written<C> {
+    channel: C,
+    subscribe: bool,
 }
 
 pub(crate) struct Connection {
@@ -554,12 +624,7 @@ impl<C: FeedChannel> Session<C> {
                     flush_since: None,
                     slot: None,
                 };
-                self.state = State::Connected(
-                    Box::new(connection),
-                    Sent {
-                        subscribed: BTreeMap::new(),
-                    },
-                );
+                self.state = State::Connected(Box::new(connection), Sent::empty());
                 if self.attempt > 0 {
                     Some(Ok(C::reconnected()))
                 } else {
@@ -666,10 +731,18 @@ impl<C: FeedChannel> Session<C> {
 
         match step {
             Step::Message(Message::Text(text)) => match C::decode(&text) {
-                Ok(event) => match C::event_key(&event) {
+                Ok(Decoded::Event(event)) => match C::event_key(&event) {
                     Some(key) if !desired.contains_key(&key) => None,
-                    _ => Some(Ok(event)),
+                    Some(key) => {
+                        sent.confirmed(&key);
+                        Some(Ok(event))
+                    }
+                    None => Some(Ok(event)),
                 },
+                Ok(Decoded::Rejected(text)) => {
+                    let channel = sent.rejected(desired);
+                    Some(Ok(C::rejected(channel, text)))
+                }
                 Err(kind) => {
                     self.state = State::Closed;
                     Some(Err(Error::Protocol(ProtocolError {
@@ -700,10 +773,11 @@ impl<C: FeedChannel> Session<C> {
                 }
                 let key = channel.key();
                 if subscribe {
-                    sent.subscribed.insert(key, channel);
+                    sent.subscribed.insert(key, channel.clone());
                 } else {
                     sent.subscribed.remove(&key);
                 }
+                sent.last = Some(Written { channel, subscribe });
                 conn.slot = None;
                 conn.flush_since.get_or_insert(now);
                 None
@@ -1042,16 +1116,31 @@ mod tests {
         }
     }
 
+    fn rejected_text<C: Codec>(text: &str) -> Box<str> {
+        match C::decode(text).unwrap() {
+            Decoded::Rejected(text) => text,
+            Decoded::Event(_) => panic!("{text} is a rejection"),
+        }
+    }
+
     #[test]
     fn an_error_field_becomes_rejected_with_its_text() {
-        match PublicChannel::decode(r#"{"error":"Requests are too many."}"#).unwrap() {
-            PublicEvent::Rejected(text) => assert_eq!(&*text, "Requests are too many."),
-            other => panic!("{other:?}"),
-        }
-        match PrivateChannel::decode(r#"{"error":{"code":1}}"#).unwrap() {
-            PrivateEvent::Rejected(text) => assert_eq!(&*text, r#"{"code":1}"#),
-            other => panic!("{other:?}"),
-        }
+        assert_eq!(
+            &*rejected_text::<PublicChannel>(r#"{"error":"Requests are too many."}"#),
+            "Requests are too many."
+        );
+        assert_eq!(
+            &*rejected_text::<PrivateChannel>(r#"{"error":{"code":1}}"#),
+            r#"{"code":1}"#
+        );
+    }
+
+    #[test]
+    fn a_rejection_text_is_cut_at_512_bytes_on_a_char_boundary() {
+        let long = "あ".repeat(200);
+        let text = rejected_text::<PublicChannel>(&format!(r#"{{"error":"{long}"}}"#));
+        assert_eq!(text.len(), 510, "170 three-byte chars fit under 512 bytes");
+        assert!(text.chars().all(|c| c == 'あ'));
     }
 
     #[test]
@@ -1175,7 +1264,10 @@ mod tests {
 
     #[test]
     fn every_ws_fixture_decodes_to_its_event() {
-        let public = |name: &str| PublicChannel::decode(&fixture(name)).unwrap();
+        let public = |name: &str| match PublicChannel::decode(&fixture(name)).unwrap() {
+            Decoded::Event(event) => event,
+            Decoded::Rejected(text) => panic!("{name}: {text}"),
+        };
         assert!(
             matches!(public("ws_public_ticker.json"), PublicEvent::Ticker(t) if t.symbol == Symbol::BTC)
         );
@@ -1185,7 +1277,10 @@ mod tests {
         assert!(
             matches!(public("ws_public_trades.json"), PublicEvent::Trade(t) if t.symbol == Symbol::BTC)
         );
-        let private = |name: &str| PrivateChannel::decode(&fixture(name)).unwrap();
+        let private = |name: &str| match PrivateChannel::decode(&fixture(name)).unwrap() {
+            Decoded::Event(event) => event,
+            Decoded::Rejected(text) => panic!("{name}: {text}"),
+        };
         assert!(
             matches!(private("ws_private_executionEvents.json"), PrivateEvent::Execution(e) if e.symbol == Symbol::BTC_JPY)
         );
