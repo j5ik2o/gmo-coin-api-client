@@ -144,6 +144,8 @@ impl fmt::Display for ContractViolation {
     }
 }
 
+impl std::error::Error for ContractViolation {}
+
 impl From<InvalidValue> for ContractViolation {
     fn from(v: InvalidValue) -> Self {
         ContractViolation::InvalidValue(v)
@@ -206,6 +208,8 @@ impl fmt::Display for ApiError {
         Ok(())
     }
 }
+
+impl std::error::Error for ApiError {}
 
 /// `{message_code, message_string}` の 1 組。エラーエンベロープ、または
 /// `cancelOrders` の失敗エントリから来る。
@@ -372,6 +376,8 @@ impl fmt::Display for ProtocolError {
     }
 }
 
+impl std::error::Error for ProtocolError {}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ProtocolErrorKind {
@@ -519,6 +525,8 @@ impl fmt::Display for TransportError {
     }
 }
 
+impl std::error::Error for TransportError {}
+
 /// リクエストが取引所に届いた可能性があるか。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Delivery {
@@ -569,6 +577,25 @@ impl fmt::Display for Phase {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 呼び出し側が `Box<dyn std::error::Error>` を返す関数で `?` を使えること。
+    /// `Feed::subscribe` は `ContractViolation` をそのまま返す唯一の公開 API で、
+    /// I/O なしに呼べる。
+    #[test]
+    fn every_detail_type_is_an_error_so_question_mark_boxes_it() {
+        fn subscribe_with_question_mark() -> Result<(), Box<dyn std::error::Error>> {
+            use crate::ws::PublicChannel;
+            let mut feed = crate::Client::production().public_feed();
+            feed.subscribe(PublicChannel::Ticker(crate::Symbol::BTC))?;
+            Ok(())
+        }
+        fn is_error<E: std::error::Error + Send + Sync + 'static>() {}
+        is_error::<ContractViolation>();
+        is_error::<ApiError>();
+        is_error::<ProtocolError>();
+        is_error::<TransportError>();
+        subscribe_with_question_mark().unwrap();
+    }
 
     #[test]
     fn error_codes_parse_only_the_documented_shape() {
