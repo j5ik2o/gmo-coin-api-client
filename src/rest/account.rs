@@ -474,8 +474,9 @@ impl Client<Authenticated> {
     /// `POST /private/v1/account/transfer`。取引所は 3 分に 1 回しか受け付けない。
     ///
     /// # 事前条件
-    /// [`Amount`] が保証する (負でない)。3 分の間隔は取引所が強制する。
-    /// このクレートは絞らない。
+    /// `amount` はゼロでない (そうでなければ `Contract(InvalidValue)`、何も
+    /// 送られない)。負でないことは [`Amount`] が保証する。3 分の間隔は
+    /// 取引所が強制する。このクレートは絞らない。
     ///
     /// # 事後条件
     /// `data` がちょうど 1 件を持ち (そうでなければ
@@ -483,7 +484,8 @@ impl Client<Authenticated> {
     /// を返す。
     ///
     /// # エラー
-    /// [REST 共通の集合](crate::rest#エラー)。振替可能額を超えると ERR-754。
+    /// `Contract`: `amount` がゼロ。ほかは [REST 共通の集合](crate::rest#エラー)。
+    /// 振替可能額を超えると ERR-754。
     /// この操作には `client_order_id` のような冪等キーがない。`outcome_unknown()`
     /// のとき再送すると二度振り替わり得るので、再送しない。先に `margin()` の
     /// `transferable_amount` か履歴系のエンドポイントで残高を照合する。
@@ -508,6 +510,13 @@ impl Client<Authenticated> {
         #[serde(rename_all = "camelCase")]
         struct Entry {
             transferred_amount: Amount,
+        }
+        if amount.get().is_zero() {
+            return Err(InvalidValue {
+                primitive: Primitive::Amount,
+                violation: Violation::Semantics("zero"),
+            }
+            .into());
         }
         let call = Call::new(endpoint!(POST "/v1/account/transfer")).json(&Body {
             amount,

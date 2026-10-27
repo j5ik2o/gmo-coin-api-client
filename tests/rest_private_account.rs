@@ -296,6 +296,26 @@ async fn transfer_requires_exactly_one_entry_in_the_answer() {
 }
 
 #[tokio::test]
+async fn a_zero_transfer_never_leaves_the_client() {
+    let mock = MockExchange::start().await;
+
+    let err = authed(&mock)
+        .transfer(Amount::parse("0").unwrap(), TransferType::Deposit)
+        .await
+        .expect_err("zero amount");
+
+    assert!(
+        matches!(
+            &err,
+            Error::Contract(ContractViolation::InvalidValue(v))
+                if v.primitive == gmo_coin_api_client::Primitive::Amount
+        ),
+        "{err:?}"
+    );
+    assert!(mock.requests().is_empty(), "nothing reached the exchange");
+}
+
+#[tokio::test]
 async fn an_exchange_refusal_is_a_typed_api_error() {
     let mock = MockExchange::start().await;
     mock.on("POST", "/private/v1/account/transfer")
