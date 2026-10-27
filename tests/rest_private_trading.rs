@@ -419,7 +419,7 @@ async fn place_order_signs_and_sends_each_execution_grammar() {
     let mock = MockExchange::start().await;
     let bodies = [
         json!({"symbol":"BTC","side":"BUY","executionType":"MARKET","size":"0.02","clientOrderId":"abc123"}),
-        json!({"symbol":"BTC","side":"SELL","executionType":"MARKET","cancelBefore":true,"size":"0.02","clientOrderId":"abc123"}),
+        json!({"symbol":"BTC","side":"SELL","executionType":"MARKET","timeInForce":"FAK","cancelBefore":true,"size":"0.02","clientOrderId":"abc123"}),
         json!({"symbol":"BTC_JPY","side":"BUY","executionType":"STOP","price":"1500000","losscutPrice":"1300000","size":"0.02","clientOrderId":"abc123"}),
         json!({"symbol":"BTC","side":"BUY","executionType":"LIMIT","timeInForce":"SOK","price":"1430001","size":"0.02","clientOrderId":"abc123"}),
     ];

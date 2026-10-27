@@ -10,7 +10,7 @@
 //! | `timeInForce` は LIMIT のみ                              | `Limit` だけがフィールドを持つ |
 //! | `SOK` (post-only) は LIMIT のみ                          | `LimitTimeInForce`         |
 //! | `losscutPrice` は LIMIT/STOP のみ、決済注文では不可       | variant のフィールド       |
-//! | `cancelBefore` は MARKET (FAK) のみ                      | `MarketCancelBefore` variant |
+//! | `cancelBefore` は MARKET + FAK のみ                      | `MarketCancelBefore` variant (FAK を明示) |
 //! | `closeBulkOrder` に `cancelBefore` はない                | `BulkCloseExecution` が持たない |
 //! | `closeOrder` が決済する建玉はちょうど 1 つ               | `PositionId` フィールド 1 つ |
 //! | `clientOrderId` は 36 文字以内の英数字                   | `ClientOrderId`            |
@@ -79,7 +79,8 @@ pub enum OrderExecution {
     /// MARKET。取引所は FAK で執行する。
     Market,
     /// `cancelBefore: true` 付きの MARKET。数量が収まるまで古い有効注文を
-    /// 取り消してから、成行で売る (FAK)。現物の `Sell` のみ。
+    /// 取り消してから、成行で売る。現物の `Sell` のみ。`timeInForce` は
+    /// ドキュメントの条件どおり `FAK` を明示して送る (本番では未確認)。
     MarketCancelBefore,
     /// LIMIT。`losscut_price` はレバレッジ銘柄のみ。
     Limit {
@@ -117,11 +118,13 @@ impl WireExecution {
         cancel_before: None,
     };
 
-    /// 取引所の MARKET の既定は FAK で、`cancelBefore` が要求するものと同じ。
-    /// だから `timeInForce` は付けない。
+    /// ドキュメントは `cancelBefore` を「MARKET、timeInForce FAK」の条件で
+    /// 許すので、FAK を明示して送る。同じドキュメントは `timeInForce` を
+    /// LIMIT のみとも書いており、矛盾している。本番で未確認で、取引所が
+    /// ERR-5111 で拒否する可能性は残る。
     const MARKET_CANCEL_BEFORE: WireExecution = WireExecution {
         execution_type: "MARKET",
-        time_in_force: None,
+        time_in_force: Some(LimitTimeInForce::Fak),
         price: None,
         cancel_before: Some(true),
     };
@@ -510,11 +513,24 @@ mod tests {
     }
 
     #[test]
-    fn cancel_before_is_a_market_order_without_time_in_force() {
+    fn cancel_before_is_a_market_order_with_an_explicit_fak() {
         let o = order(Symbol::BTC, Side::Sell, OrderExecution::MarketCancelBefore);
         assert_eq!(
             body(&o.wire()),
-            json!({"symbol":"BTC","side":"SELL","executionType":"MARKET","cancelBefore":true,"size":"0.02","clientOrderId":"abc123"})
+            json!({"symbol":"BTC","side":"SELL","executionType":"MARKET","timeInForce":"FAK","cancelBefore":true,"size":"0.02","clientOrderId":"abc123"})
+        );
+        let c = ClosePosition {
+            client_order_id: ClientOrderId::parse("c1").unwrap(),
+            symbol: Symbol::BTC_JPY,
+            side: Side::Sell,
+            position_id: PositionId::new(1234567).unwrap(),
+            size: OrderSize::parse("0.1").unwrap(),
+            execution: CloseExecution::MarketCancelBefore,
+        };
+        assert_eq!(
+            body(&c.wire()),
+            json!({"symbol":"BTC_JPY","side":"SELL","executionType":"MARKET","timeInForce":"FAK","cancelBefore":true,
+                   "settlePosition":[{"positionId":1234567,"size":"0.1"}],"clientOrderId":"c1"})
         );
     }
 
