@@ -146,7 +146,9 @@ impl CancelOrdersOutcome {
     ) -> core::result::Result<Self, ProtocolErrorKind> {
         let mut failed = Vec::with_capacity(wire.failed.len());
         for f in &wire.failed {
-            let message = message(&f.message).ok_or(ProtocolErrorKind::MalformedErrorEnvelope)?;
+            let message = message(&f.message).ok_or(ProtocolErrorKind::Postcondition(
+                Postcondition::CancelRejectionMalformed(f.order_id),
+            ))?;
             failed.push(CancelRejection {
                 order_id: f.order_id,
                 message,

@@ -873,6 +873,34 @@ async fn cancel_orders_rejects_an_id_reported_twice() {
 }
 
 #[tokio::test]
+async fn cancel_orders_with_a_malformed_rejection_is_still_an_accepted_answer() {
+    let mock = MockExchange::start().await;
+    mock.on("POST", "/private/v1/cancelOrders").reply(Reply::Json(
+        r#"{"status":0,"data":{"success":[],"failed":[{"orderId":1,"message_code":"5122","message_string":"x"}]}}"#
+            .to_owned(),
+    ));
+    let sent = Batch::new(vec![oid(1)]).unwrap();
+
+    let err = authed(&mock)
+        .cancel_orders(&sent)
+        .await
+        .expect_err("code without the ERR- prefix");
+
+    assert!(
+        matches!(
+            &err,
+            Error::Protocol(p) if p.kind()
+                == &ProtocolErrorKind::Postcondition(Postcondition::CancelRejectionMalformed(oid(1)))
+        ),
+        "{err:?}"
+    );
+    assert!(
+        err.outcome_unknown() && err.accepted_but_unreadable(),
+        "status 0 means the exchange processed the cancel: {err:?}"
+    );
+}
+
+#[tokio::test]
 async fn cancel_bulk_orders_sends_the_filter_and_returns_the_ids() {
     let mock = MockExchange::start().await;
     mock.on("POST", "/private/v1/cancelBulkOrder")

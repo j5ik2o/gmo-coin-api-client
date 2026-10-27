@@ -390,7 +390,9 @@ pub enum ProtocolErrorKind {
 
 impl ProtocolErrorKind {
     /// `status == 0` のエンベロープを受け取った後にしか起きない種類か。
-    /// これらは `Answer` (成功エンベロープ) からしか作られない。
+    /// これらは `Answer` (成功エンベロープ) からしか作られない。逆に
+    /// `HttpStatus`、`NotAnEnvelope`、`MalformedErrorEnvelope` はエンベロープの
+    /// 検査 (`envelope::parse`) からしか作られない。
     fn after_acceptance(&self) -> bool {
         matches!(
             self,
@@ -409,6 +411,9 @@ pub enum Postcondition {
     CancelResultIdNotRequested(OrderId),
     /// `cancelOrders` が 1 つの id を取消済みと失敗の両方、または二度報告した。
     CancelResultIdRepeated(OrderId),
+    /// `cancelOrders` の `failed` エントリの理由が、`ERR-<n>` のコードと
+    /// 512 バイト以下の文章という形でなかった。
+    CancelRejectionMalformed(OrderId),
     /// `ticker(symbol)` / `order_book(symbol)` が別の銘柄で答えた、または
     /// エントリがちょうど 1 件でなかった。
     WrongSymbol,
@@ -432,6 +437,9 @@ impl fmt::Display for Postcondition {
             }
             Postcondition::CancelResultIdRepeated(id) => {
                 write!(f, "注文 id {id} が結果に二度現れました")
+            }
+            Postcondition::CancelRejectionMalformed(id) => {
+                write!(f, "注文 id {id} の拒否理由が規約の形ではありません")
             }
             Postcondition::WrongSymbol => f.write_str("要求した銘柄と応答の銘柄が一致しません"),
             Postcondition::OrderNotRequested(id) => {
