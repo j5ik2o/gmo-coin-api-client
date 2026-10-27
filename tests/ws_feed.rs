@@ -142,6 +142,11 @@ async fn private_feed_reuses_its_token_across_a_reconnect_and_deletes_it_on_clos
         ["POST", "DELETE"],
         "one token for both connections, deleted on close"
     );
+    mock.with_tokens(|t| {
+        assert_eq!(t.issued.len(), 1);
+        assert_eq!(t.deleted, t.issued, "close deleted the one token");
+        assert!(t.live_tokens().is_empty());
+    });
 }
 
 /// `next` を数ミリ秒ごとに打ち切り続けても、購読は 1 回ずつ送られ、
