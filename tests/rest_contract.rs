@@ -11,7 +11,8 @@ use gmo_coin_api_client::error::{
 use gmo_coin_api_client::rest::{NewOrder, OrderExecution};
 use gmo_coin_api_client::{
     Batch, ClientOrderId, Config, Error, ExchangeStatus, KlineSpan, LongInterval, OrderId,
-    PageRequest, Price, Primitive, RestBase, Side, Size, Symbol, Timeout, Violation,
+    OrderPrice, OrderSize, PageRequest, Price, Primitive, RestBase, Side, Size, Symbol, Timeout,
+    Violation,
 };
 use serde_json::json;
 use support::{MockExchange, Reply, SignatureCheck, api_error, fixture};
@@ -113,7 +114,6 @@ async fn pooled_connections_are_reused_across_calls() {
 }
 
 #[tokio::test]
-#[ignore = "phase 2: place_order serializes NewOrder"]
 async fn place_order_signs_the_exact_bytes_it_sends() {
     let mock = MockExchange::start().await;
     let id = ClientOrderId::parse("abc123").unwrap();
@@ -133,11 +133,11 @@ async fn place_order_signs_the_exact_bytes_it_sends() {
             client_order_id: id,
             symbol: Symbol::BTC_JPY,
             side: Side::Buy,
-            size: Size::parse("0.02").unwrap(),
+            size: OrderSize::parse("0.02").unwrap(),
             execution: OrderExecution::Limit {
-                price: Price::parse("1430001").unwrap(),
+                price: OrderPrice::parse("1430001").unwrap(),
                 time_in_force: gmo_coin_api_client::LimitTimeInForce::Fas,
-                losscut_price: Some(Price::parse("1300000").unwrap()),
+                losscut_price: Some(OrderPrice::parse("1300000").unwrap()),
             },
         })
         .await
@@ -153,7 +153,6 @@ async fn place_order_signs_the_exact_bytes_it_sends() {
 }
 
 #[tokio::test]
-#[ignore = "phase 2: cancel_orders decodes the partial-success answer"]
 async fn cancel_orders_returns_partial_success_as_ok() {
     let mock = MockExchange::start().await;
     mock.on("POST", "/private/v1/cancelOrders")
@@ -179,7 +178,6 @@ async fn cancel_orders_returns_partial_success_as_ok() {
 }
 
 #[tokio::test]
-#[ignore = "phase 2: cancel_orders checks its postcondition"]
 async fn cancel_orders_postcondition_rejects_an_id_never_sent() {
     let mock = MockExchange::start().await;
     mock.on("POST", "/private/v1/cancelOrders")
@@ -233,7 +231,7 @@ async fn cancel_before_on_a_buy_is_rejected_at_the_boundary() {
             client_order_id: ClientOrderId::generate(),
             symbol: Symbol::BTC,
             side: Side::Buy,
-            size: Size::parse("0.01").unwrap(),
+            size: OrderSize::parse("0.01").unwrap(),
             execution: OrderExecution::MarketCancelBefore,
         })
         .await
