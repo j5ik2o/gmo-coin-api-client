@@ -622,6 +622,96 @@ async fn a_rejected_api_key_at_ws_auth_ends_the_feed() {
     mock.assert_done();
 }
 
+/// 45 分を待てないので、スケジュールを縮めて延長が `PUT ws-auth` を
+/// 送ることを確かめる。キャンセルを繰り返しても PUT は 1 回だけ。
+#[tokio::test]
+async fn the_token_is_extended_on_schedule_even_under_cancellation() {
+    let mock = MockExchange::start().await;
+    let ws = mock.ws();
+    let client = fast_client(&mock, |_| {}).authenticate(MockExchange::credentials());
+    let mut feed = client
+        .private_feed_with_lease_schedule_for_loopback(
+            Duration::from_millis(300),
+            Duration::from_millis(50),
+            Duration::from_secs(60),
+        )
+        .unwrap();
+    feed.subscribe(PrivateChannel::OrderEvents).unwrap();
+
+    let deadline = Instant::now() + WAIT;
+    let mut extended = Vec::new();
+    while extended.is_empty() && Instant::now() < deadline {
+        let _ = tokio::time::timeout(Duration::from_millis(3), feed.next()).await;
+        extended = mock.with_tokens(|t| t.extended.clone());
+    }
+    let issued = mock.with_tokens(|t| t.issued.clone());
+    assert_eq!(issued.len(), 1, "one token for the whole run");
+    assert_eq!(extended, issued, "the live token was extended");
+    assert_eq!(ws.handshakes(Api::Private), 1, "no reconnect was needed");
+
+    let settle = Instant::now() + Duration::from_millis(100);
+    while Instant::now() < settle {
+        let _ = tokio::time::timeout(Duration::from_millis(3), feed.next()).await;
+    }
+    let puts = mock.requests().iter().filter(|r| r.method == "PUT").count();
+    assert_eq!(
+        puts, 1,
+        "a cancelled extend is not retried while it is in flight"
+    );
+    feed.close().await.unwrap();
+    mock.assert_done();
+}
+
+/// ソケットが常に読めるときも延長は期限に送られる。モックが先にイベントを
+/// 大量に積み、呼び出し側はゆっくり読む: `next` のたびにフレームが待って
+/// いるので、タイマーがソケットの後ろに並ぶ実装では PUT が来ない。
+#[tokio::test]
+async fn the_token_is_extended_while_the_socket_stays_busy() {
+    const BACKLOG: usize = 2_000;
+    let mock = MockExchange::start().await;
+    let ws = mock.ws();
+    let client = fast_client(&mock, |_| {}).authenticate(MockExchange::credentials());
+    let mut feed = client
+        .private_feed_with_lease_schedule_for_loopback(
+            Duration::from_millis(100),
+            Duration::from_millis(50),
+            Duration::from_secs(60),
+        )
+        .unwrap();
+    feed.subscribe(PrivateChannel::OrderEvents).unwrap();
+
+    let driver = tokio::spawn(async move {
+        let event = feed.next().await;
+        (feed, event)
+    });
+    ws.subscribed(Api::Private, "orderEvents", None, WAIT).await;
+    for _ in 0..BACKLOG {
+        ws.push(Api::Private, &fixture("ws_private_orderEvents.json"));
+    }
+    let (mut feed, event) = driver.await.unwrap();
+    assert!(matches!(event, Ok(PrivateEvent::Order(_))), "{event:?}");
+
+    let started = Instant::now();
+    let mut orders = 1;
+    while started.elapsed() < Duration::from_millis(400) {
+        match feed.next().await.unwrap() {
+            PrivateEvent::Order(_) => orders += 1,
+            other => panic!("{other:?}"),
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    assert!(orders < BACKLOG, "the backlog outlasted the run: {orders}");
+    let extended = mock.with_tokens(|t| t.extended.clone());
+    let issued = mock.with_tokens(|t| t.issued.clone());
+    assert_eq!(issued.len(), 1);
+    assert!(
+        !extended.is_empty() && extended.iter().all(|t| *t == issued[0]),
+        "the one token was extended during the burst: {extended:?}"
+    );
+    assert_eq!(ws.handshakes(Api::Private), 1);
+    feed.close().await.unwrap();
+}
+
 /// `close` が接続試行の途中で呼ばれても、その試行で発行したトークンは
 /// 削除される。
 #[tokio::test]

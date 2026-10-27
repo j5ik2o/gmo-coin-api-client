@@ -312,19 +312,27 @@ impl<A: Access> Client<A> {
     /// どちらかの WebSocket ベースがループバックでないとき
     /// `Semantics("not loopback")`。本番の取引所に向けて止めることはできない。
     pub fn unpaced_ws_commands_for_loopback(&self) -> Result<(), InvalidValue> {
+        self.require_loopback_ws()?;
+        self.inner.public_ws_pacer.unpace();
+        self.inner.private_ws_pacer.unpace();
+        Ok(())
+    }
+
+    /// テスト専用の挙動の門: 両方の WebSocket ベースが平文 (ループバック
+    /// IP リテラルにしか許されない) であることを求める。
+    fn require_loopback_ws(&self) -> Result<(), InvalidValue> {
         let endpoints = &self.inner.endpoints;
         let loopback = [endpoints.public_ws.base(), endpoints.private_ws.base()]
             .iter()
             .all(|base| matches!(base.transport, Transport::Plain(_)));
-        if !loopback {
-            return Err(InvalidValue {
+        if loopback {
+            Ok(())
+        } else {
+            Err(InvalidValue {
                 primitive: Primitive::BaseUrl,
                 violation: Violation::Semantics("not loopback"),
-            });
+            })
         }
-        self.inner.public_ws_pacer.unpace();
-        self.inner.private_ws_pacer.unpace();
-        Ok(())
     }
 }
 
@@ -344,6 +352,46 @@ impl Client<Authenticated> {
         Feed {
             session: session::Session::private(self.clone()),
         }
+    }
+
+    /// テスト用: トークンの延長 (既定 45 分) と失効 (既定 60 分) の刻みを
+    /// 縮めた Private フィード。ループバックのモック取引所に対してだけ使える。
+    ///
+    /// # 事前条件
+    /// `extend_after <= expires_after`。両方の WebSocket ベースがループバック
+    /// IP リテラルへの平文トランスポートであること。
+    ///
+    /// # 事後条件
+    /// I/O なし。フィードは取得または延長の要求を送った時刻から
+    /// `extend_after` 後に `PUT ws-auth` を送り、失敗なら `retry_after` 後
+    /// (ただし失効まで) に再試行する。
+    ///
+    /// # エラー
+    /// どちらかの WebSocket ベースがループバックでないとき
+    /// `Semantics("not loopback")`。`extend_after > expires_after` のとき
+    /// `Semantics("extend after expiry")`。
+    #[doc(hidden)]
+    pub fn private_feed_with_lease_schedule_for_loopback(
+        &self,
+        extend_after: Duration,
+        retry_after: Duration,
+        expires_after: Duration,
+    ) -> Result<Feed<PrivateChannel>, InvalidValue> {
+        self.require_loopback_ws()?;
+        if extend_after > expires_after {
+            return Err(InvalidValue {
+                primitive: Primitive::Config,
+                violation: Violation::Semantics("extend after expiry"),
+            });
+        }
+        let schedule = session::LeaseSchedule {
+            extend_after,
+            retry_after,
+            expires_after,
+        };
+        Ok(Feed {
+            session: session::Session::private_with(self.clone(), schedule),
+        })
     }
 }
 

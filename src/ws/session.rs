@@ -495,17 +495,26 @@ impl Connection {
     /// 1 回のポーリング: まず flush (キャンセル前に積んだフレームと、
     /// tungstenite が読みながら積んだ pong を押し出す)、次に書きたければ
     /// 書き込み準備、最後に読む。
+    ///
+    /// 書き込みの期限は flush が `Pending` を返した直後に、ここで検査する。
+    /// 期限の状態を知るのは flush だけなので、タイマーの腕で先に検査すると
+    /// 完了済みの flush を期限切れと誤り、後に検査すると読める限りソケットが
+    /// タイマーを飢えさせる。
     fn poll_socket(
         &mut self,
         cx: &mut Context<'_>,
         want_write: bool,
+        write_bound: Duration,
         limits: &Limits,
     ) -> Poll<Step> {
         match self.stream.poll_flush_unpin(cx) {
             Poll::Ready(Ok(())) => self.flush_since = None,
             Poll::Ready(Err(e)) => return Poll::Ready(Step::Failed(ws::error_kind(&e, limits))),
             Poll::Pending => {
-                self.flush_since.get_or_insert_with(Instant::now);
+                let since = *self.flush_since.get_or_insert_with(Instant::now);
+                if since + write_bound <= Instant::now() {
+                    return Poll::Ready(Step::WriteTimedOut);
+                }
             }
         }
         if want_write {
@@ -785,16 +794,20 @@ impl<C: FeedChannel> Session<C> {
             Auth::Public => None,
         };
 
+        // 腕の順序が契約である。延長 (結果と期限) とスロットはソケットより
+        // 先: 常に読めるソケットがそれらを飢えさせてはならない。アイドルは
+        // ソケットより後: フレームが待っているなら沈黙ではない。書き込みの
+        // 期限は `poll_socket` の中で検査し、ここの腕は起床のためだけにある。
         let step = tokio::select! {
             biased;
-            step = poll_fn(|cx| conn.poll_socket(cx, want_write, &inner.config.limits)) => step,
             (sent_at, result) = poll_fn(|cx| match extend.as_mut() {
                 Some(fut) => fut.as_mut().poll(cx),
                 None => Poll::Pending,
             }) => Step::Extended(sent_at, result),
-            _ = sleep_until(slot.unwrap_or(now)), if slot.is_some() && !want_write => Step::SlotReached,
-            _ = sleep_until(write_deadline.unwrap_or(now)), if write_deadline.is_some() => Step::WriteTimedOut,
             _ = sleep_until(extend_at.unwrap_or(now)), if extend_at.is_some() => Step::ExtendDue,
+            _ = sleep_until(slot.unwrap_or(now)), if slot.is_some() && !want_write => Step::SlotReached,
+            step = poll_fn(|cx| conn.poll_socket(cx, want_write, timeouts.ws_write.get(), &inner.config.limits)) => step,
+            _ = sleep_until(write_deadline.unwrap_or(now)), if write_deadline.is_some() => Step::WriteTimedOut,
             _ = sleep_until(idle_at) => Step::Idle,
         };
 
@@ -844,7 +857,7 @@ impl<C: FeedChannel> Session<C> {
                 }
                 sent.last = Some(Written { channel, subscribe });
                 conn.slot = None;
-                conn.flush_since.get_or_insert(now);
+                conn.flush_since.get_or_insert_with(Instant::now);
                 None
             }
             Step::SlotReached => None,
@@ -1119,7 +1132,13 @@ mod tests {
 
     use super::*;
     use crate::domain::Symbol;
-    use crate::mock::{Api, MockExchange, fixture};
+
+    /// `tests/fixtures/<name>` をコンパイル時に埋め込む。
+    macro_rules! fixture {
+        ($name:literal) => {
+            include_str!(concat!("../../tests/fixtures/", $name))
+        };
+    }
 
     fn parsed(text: &str) -> Value {
         serde_json::from_str(text).unwrap()
@@ -1295,78 +1314,38 @@ mod tests {
         ));
     }
 
-    /// 45 分を待てないので、スケジュールを縮めて延長が `PUT ws-auth` を
-    /// 送ることを確かめる。キャンセルを繰り返しても PUT は 1 回だけ。
-    #[tokio::test]
-    async fn the_token_is_extended_on_schedule_even_under_cancellation() {
-        let mock = MockExchange::start().await;
-        let ws = mock.ws();
-        let client = mock.client().authenticate(MockExchange::credentials());
-        client.unpaced_ws_commands_for_loopback().unwrap();
-        let schedule = LeaseSchedule {
-            extend_after: Duration::from_millis(300),
-            retry_after: Duration::from_millis(50),
-            expires_after: Duration::from_secs(60),
-        };
-        let mut session = Session::private_with(client, schedule);
-        session.desire(PrivateChannel::OrderEvents).unwrap();
-
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let mut extended = Vec::new();
-        while extended.is_empty() && Instant::now() < deadline {
-            let _ = tokio::time::timeout(Duration::from_millis(3), session.next()).await;
-            extended = mock.with_tokens(|t| t.extended.clone());
-        }
-        let issued = mock.with_tokens(|t| t.issued.clone());
-        assert_eq!(issued.len(), 1, "one token for the whole run");
-        assert_eq!(extended, issued, "the live token was extended");
-        assert_eq!(ws.handshakes(Api::Private), 1, "no reconnect was needed");
-
-        let settle = Instant::now() + Duration::from_millis(100);
-        while Instant::now() < settle {
-            let _ = tokio::time::timeout(Duration::from_millis(3), session.next()).await;
-        }
-        let puts = mock.requests().iter().filter(|r| r.method == "PUT").count();
-        assert_eq!(
-            puts, 1,
-            "a cancelled extend is not retried while it is in flight"
-        );
-        session.close().await.unwrap();
-        mock.assert_done();
-    }
-
     #[test]
     fn every_ws_fixture_decodes_to_its_event() {
-        let public = |name: &str| match PublicChannel::decode(&fixture(name)).unwrap() {
+        let public = |text: &str| match PublicChannel::decode(text).unwrap() {
             Decoded::Event(event) => event,
-            Decoded::Rejected(text) => panic!("{name}: {text}"),
+            Decoded::Rejected(text) => panic!("{text}"),
         };
         assert!(
-            matches!(public("ws_public_ticker.json"), PublicEvent::Ticker(t) if t.symbol == Symbol::BTC)
+            matches!(public(fixture!("ws_public_ticker.json")), PublicEvent::Ticker(t) if t.symbol == Symbol::BTC)
         );
         assert!(
-            matches!(public("ws_public_orderbooks.json"), PublicEvent::OrderBook(b) if b.asks.len() == 2)
+            matches!(public(fixture!("ws_public_orderbooks.json")), PublicEvent::OrderBook(b) if b.asks.len() == 2)
         );
         assert!(
-            matches!(public("ws_public_trades.json"), PublicEvent::Trade(t) if t.symbol == Symbol::BTC)
+            matches!(public(fixture!("ws_public_trades.json")), PublicEvent::Trade(t) if t.symbol == Symbol::BTC)
         );
-        let private = |name: &str| match PrivateChannel::decode(&fixture(name)).unwrap() {
+        let private = |text: &str| match PrivateChannel::decode(text).unwrap() {
             Decoded::Event(event) => event,
-            Decoded::Rejected(text) => panic!("{name}: {text}"),
+            Decoded::Rejected(text) => panic!("{text}"),
         };
         assert!(
-            matches!(private("ws_private_executionEvents.json"), PrivateEvent::Execution(e) if e.symbol == Symbol::BTC_JPY)
+            matches!(private(fixture!("ws_private_executionEvents.json")), PrivateEvent::Execution(e) if e.symbol == Symbol::BTC_JPY)
         );
         assert!(matches!(
-            private("ws_private_orderEvents.json"),
+            private(fixture!("ws_private_orderEvents.json")),
             PrivateEvent::Order(_)
         ));
         assert!(matches!(
-            private("ws_private_positionEvents.json"),
+            private(fixture!("ws_private_positionEvents.json")),
             PrivateEvent::Position(_)
         ));
         assert!(matches!(
-            private("ws_private_positionSummaryEvents.json"),
+            private(fixture!("ws_private_positionSummaryEvents.json")),
             PrivateEvent::PositionSummary(_)
         ));
     }
