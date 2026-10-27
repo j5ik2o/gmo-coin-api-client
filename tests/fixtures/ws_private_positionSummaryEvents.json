@@ -1,0 +1,11 @@
+{
+  "channel":"positionSummaryEvents",
+  "symbol":"BTC_JPY",
+  "side":"BUY",
+  "averagePositionRate":"1014484",
+  "positionLossGain":"18",
+  "sumOrderQuantity":"0.01",
+  "sumPositionQuantity":"0.03",
+  "timestamp":"2020-06-24T09:53:19.702Z",
+  "msgType":"UPDATE"
+}

@@ -1,0 +1,18 @@
+{
+  "status": 0,
+  "data": [
+    {
+      "amount": "993982448",
+      "available": "993982448",
+      "conversionRate": "1",
+      "symbol": "JPY"
+    },
+    {
+      "amount": "4.0002",
+      "available": "4.0002",
+      "conversionRate": "859614",
+      "symbol": "BTC"
+    }
+  ],
+  "responsetime": "2019-03-19T02:15:06.055Z"
+}

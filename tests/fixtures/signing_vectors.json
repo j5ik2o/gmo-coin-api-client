@@ -1,0 +1,47 @@
+{
+  "secret": "test-api-secret",
+  "cases": [
+    {
+      "timestamp": "1700000000000",
+      "method": "GET",
+      "path": "/v1/account/margin",
+      "body": "",
+      "sign": "5a316cd812779d8aa73013caabb126e3f188a5796b6504a42cce010d7a611685"
+    },
+    {
+      "timestamp": "1700000000000",
+      "method": "GET",
+      "path": "/v1/orders",
+      "body": "",
+      "sign": "4166728e24224307c5ccd02b81ae9f8dbc937b7e59c0a0ba653e34dc770ab369"
+    },
+    {
+      "timestamp": "1700000000123",
+      "method": "POST",
+      "path": "/v1/order",
+      "body": "{\"symbol\":\"BTC\",\"side\":\"BUY\",\"executionType\":\"LIMIT\",\"price\":\"430001\",\"size\":\"0.02\"}",
+      "sign": "321c2f4b1b4c51b6ad65d0d97fb1e05ae37802b39e93819b393b021cb71ac5d3"
+    },
+    {
+      "timestamp": "1700000000456",
+      "method": "POST",
+      "path": "/v1/ws-auth",
+      "body": "{}",
+      "sign": "a5840e473efd6721cf8689b0443eeb70b03d826bbf9486d22ea4ce439e037831"
+    },
+    {
+      "timestamp": "1700000000789",
+      "method": "PUT",
+      "path": "/v1/ws-auth",
+      "body": "{\"token\":\"xxxxxxxxxxxxxxxxxxxx\"}",
+      "sign": "d114e9de40f8f8923e65e769aafa2ce19662016a0575fa2cd33e7246bd0c81a4"
+    },
+    {
+      "timestamp": "1700000000999",
+      "method": "DELETE",
+      "path": "/v1/ws-auth",
+      "body": "{\"token\":\"xxxxxxxxxxxxxxxxxxxx\"}",
+      "sign": "69fe0ba2397ac2a57bbec40ff1c697dfd62147585ace7cdb102530d276446259"
+    }
+  ]
+}

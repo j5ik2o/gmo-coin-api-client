@@ -1,0 +1,23 @@
+{
+  "status": 0,
+  "data": {
+      "jpyVolume": "9988888",
+      "tierLevel": 1,
+      "limit": [
+         {
+           "symbol": "BTC/JPY",
+           "todayLimitOpenSize": "10000",
+           "takerFee": "0",
+           "makerFee": "0"
+         },
+         {
+           "symbol": "BTC",
+           "todayLimitBuySize": "98",
+           "todayLimitSellSize": "102",
+           "takerFee": "0.0015",
+           "makerFee": "-0.0007"
+         }
+      ]
+  },
+  "responsetime": "2019-03-19T02:15:06.055Z"
+}

@@ -1,0 +1,13 @@
+{
+  "channel":"orderbooks",
+  "asks": [
+    {"price": "455659","size": "0.1"},
+    {"price": "455658","size": "0.2"}
+  ],
+  "bids": [
+    {"price": "455665","size": "0.1"},
+    {"price": "455655","size": "0.3"}
+  ],
+  "symbol": "BTC",
+  "timestamp": "2018-03-30T12:34:56.789Z"
+}
