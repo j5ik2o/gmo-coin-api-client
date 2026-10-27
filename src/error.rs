@@ -210,9 +210,10 @@ pub struct ApiMessage {
 }
 
 /// `ERR-<n>` を数値にしたもの。構造上開いている: 未知のコードも単なる値で
-/// あり、文書化されたコードは `match` で使える定数である。
+/// あり、文書化されたコードは `match` で使える定数である。5 桁 (99999 まで)
+/// を収めるので `u32`。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct ErrorCode(pub u16);
+pub struct ErrorCode(pub u32);
 
 impl ErrorCode {
     pub const WRONG_POSITION_SIDE: ErrorCode = ErrorCode(70);
@@ -562,6 +563,11 @@ mod tests {
             Some(ErrorCode::WRONG_POSITION_SIDE)
         );
         assert_eq!(ErrorCode::parse("ERR-"), None);
+        assert_eq!(
+            ErrorCode::parse("ERR-70000"),
+            Some(ErrorCode(70000)),
+            "five digits reach past u16"
+        );
         assert_eq!(ErrorCode::parse("ERR-123456"), None);
         assert_eq!(ErrorCode::parse("5003"), None);
         assert_eq!(ErrorCode::parse("ERR-5x"), None);

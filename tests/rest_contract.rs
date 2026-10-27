@@ -256,6 +256,20 @@ async fn rate_limit_is_a_typed_error() {
 }
 
 #[tokio::test]
+async fn a_five_digit_code_above_u16_is_still_an_api_error() {
+    let mock = MockExchange::start().await;
+    mock.on("GET", "/public/v1/status")
+        .reply(Reply::Json(api_error("ERR-70000", "Future error.")));
+
+    let err = mock.client().status().await.expect_err("ERR-70000");
+
+    match err {
+        Error::Api(api) => assert_eq!(api.messages()[0].code.0, 70000),
+        other => panic!("expected an API error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn an_error_without_responsetime_still_decodes() {
     let mock = MockExchange::start().await;
     mock.on("GET", "/public/v1/klines")
