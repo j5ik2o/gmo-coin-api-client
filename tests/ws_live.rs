@@ -2,6 +2,10 @@
 //! `cargo test --test ws_live -- --ignored` で明示的に走らせる。
 //!
 //! 読み取り専用で、コマンドは既定のペーサ (1 秒に 1 回) で送る。
+//!
+//! `ticker` チャネルは約定があったときにしか配信されないようで、深夜の
+//! BTC では数十秒空くことがある (独立した生の WebSocket クライアントでも
+//! 最初の配信まで 17 秒かかった)。待ち時間はそれに合わせて長い。
 
 use std::time::Duration;
 
@@ -14,7 +18,8 @@ async fn the_public_ticker_feed_delivers_at_least_one_event_from_production() {
     let mut feed = Client::production().public_feed();
     feed.subscribe(PublicChannel::Ticker(Symbol::BTC)).unwrap();
 
-    let ticker = tokio::time::timeout(Duration::from_secs(30), async {
+    let started = std::time::Instant::now();
+    let ticker = tokio::time::timeout(Duration::from_secs(180), async {
         loop {
             match feed.next().await.expect("the feed stays open") {
                 PublicEvent::Ticker(t) => return t,
@@ -23,10 +28,14 @@ async fn the_public_ticker_feed_delivers_at_least_one_event_from_production() {
         }
     })
     .await
-    .expect("a ticker within 30 seconds");
+    .expect("a ticker within 180 seconds");
     println!(
-        "ticker BTC: bid {} ask {} last {} at {}",
-        ticker.bid, ticker.ask, ticker.last, ticker.timestamp
+        "ticker BTC after {:?}: bid {} ask {} last {} at {}",
+        started.elapsed(),
+        ticker.bid,
+        ticker.ask,
+        ticker.last,
+        ticker.timestamp
     );
     assert_eq!(ticker.symbol, Symbol::BTC);
     assert!(ticker.ask >= ticker.bid, "the quote is not crossed");
