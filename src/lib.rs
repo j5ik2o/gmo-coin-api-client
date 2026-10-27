@@ -62,6 +62,14 @@ mod secret;
 mod transport;
 pub mod ws;
 
+// クレート内部の呼び出し (ws-auth) をモック取引所に対して試すため、
+// 結合テスト用のモックを単体テストからも使えるようにする。
+#[cfg(test)]
+extern crate self as gmo_coin_api_client;
+#[cfg(test)]
+#[path = "../tests/support/mod.rs"]
+pub(crate) mod mock;
+
 pub use client::{
     Access, Anonymous, Authenticated, Backoff, ByteLimit, Client, Config, Limits, Timeout, Timeouts,
 };

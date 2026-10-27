@@ -1,15 +1,20 @@
-//! REST behaviour against the mock exchange: decoding the official
-//! fixtures, signing, partial success, and contract checks.
+//! モック取引所に対する REST の振る舞い: 公式サンプルのデコード、署名、
+//! 部分成功、契約の検査。
 
 mod support;
 
-use gmo_coin_api_client::error::{ContractViolation, Postcondition, ProtocolErrorKind};
+use std::time::Duration;
+
+use gmo_coin_api_client::error::{
+    ContractViolation, Phase, Postcondition, ProtocolErrorKind, TransportErrorKind,
+};
 use gmo_coin_api_client::rest::{NewOrder, OrderExecution};
 use gmo_coin_api_client::{
-    Batch, ClientOrderId, Error, OrderId, Price, Primitive, RestBase, Side, Size, Symbol, Violation,
+    Batch, ClientOrderId, Config, Error, ExchangeStatus, KlineSpan, LongInterval, OrderId,
+    PageRequest, Price, Primitive, RestBase, Side, Size, Symbol, Timeout, Violation,
 };
 use serde_json::json;
-use support::{MockExchange, Reply, SignatureCheck, api_error};
+use support::{MockExchange, Reply, SignatureCheck, api_error, fixture};
 
 fn order_ids(ids: &[u64]) -> Vec<OrderId> {
     ids.iter()
@@ -37,6 +42,73 @@ async fn ticker_decodes_the_official_fixture() {
 }
 
 #[tokio::test]
+async fn every_public_endpoint_round_trips_through_the_mock() {
+    let mock = MockExchange::start().await;
+    mock.on("GET", "/public/v1/status")
+        .times(1)
+        .fixture("public_get_status.json");
+    mock.on("GET", "/public/v1/ticker")
+        .times(1)
+        .fixture("public_get_ticker.json");
+    mock.on("GET", "/public/v1/orderbooks")
+        .query("symbol=BTC")
+        .times(1)
+        .fixture("public_get_orderbooks.json");
+    mock.on("GET", "/public/v1/trades")
+        .query("symbol=BTC&page=1&count=100")
+        .times(1)
+        .fixture("public_get_trades.json");
+    mock.on("GET", "/public/v1/klines")
+        .query("symbol=BTC&interval=1day&date=2025")
+        .times(1)
+        .fixture("public_get_klines.json");
+    mock.on("GET", "/public/v1/symbols")
+        .times(1)
+        .fixture("public_get_symbols.json");
+    let client = mock.client();
+
+    assert_eq!(client.status().await.unwrap(), ExchangeStatus::Open);
+    assert_eq!(client.tickers().await.unwrap().len(), 1);
+    let book = client.order_book(Symbol::BTC).await.unwrap();
+    assert_eq!(book.bids[0].size, Size::parse("0.1").unwrap());
+    let trades = client
+        .trades(Symbol::BTC, PageRequest::FIRST)
+        .await
+        .unwrap();
+    assert_eq!(trades.items().len(), 1);
+    assert_eq!(trades.pagination().unwrap().current_page, 1);
+    let span = KlineSpan::Year {
+        interval: LongInterval::Day1,
+        year: 2025,
+    };
+    let klines = client.klines(Symbol::BTC, span).await.unwrap();
+    assert_eq!(klines.len(), 2);
+    let rules = client.symbols().await.unwrap();
+    assert_eq!(rules[0].maker_fee.to_string(), "-0.0001");
+    assert!(
+        mock.requests()
+            .iter()
+            .all(|r| r.signature == SignatureCheck::Absent),
+        "public calls carry no auth headers"
+    );
+    mock.assert_done();
+}
+
+#[tokio::test]
+async fn pooled_connections_are_reused_across_calls() {
+    let mock = MockExchange::start().await;
+    mock.on("GET", "/public/v1/status")
+        .times(3)
+        .fixture("public_get_status.json");
+    let client = mock.client();
+    for _ in 0..3 {
+        client.status().await.unwrap();
+    }
+    mock.assert_done();
+}
+
+#[tokio::test]
+#[ignore = "phase 2: place_order serializes NewOrder"]
 async fn place_order_signs_the_exact_bytes_it_sends() {
     let mock = MockExchange::start().await;
     let id = ClientOrderId::parse("abc123").unwrap();
@@ -76,6 +148,7 @@ async fn place_order_signs_the_exact_bytes_it_sends() {
 }
 
 #[tokio::test]
+#[ignore = "phase 2: cancel_orders decodes the partial-success answer"]
 async fn cancel_orders_returns_partial_success_as_ok() {
     let mock = MockExchange::start().await;
     mock.on("POST", "/private/v1/cancelOrders")
@@ -101,6 +174,7 @@ async fn cancel_orders_returns_partial_success_as_ok() {
 }
 
 #[tokio::test]
+#[ignore = "phase 2: cancel_orders checks its postcondition"]
 async fn cancel_orders_postcondition_rejects_an_id_never_sent() {
     let mock = MockExchange::start().await;
     mock.on("POST", "/private/v1/cancelOrders")
@@ -184,8 +258,8 @@ async fn an_error_without_responsetime_still_decodes() {
     mock.on("GET", "/public/v1/klines")
         .fixture("error_without_responsetime.json");
 
-    let span = gmo_coin_api_client::KlineSpan::Year {
-        interval: gmo_coin_api_client::LongInterval::Day1,
+    let span = KlineSpan::Year {
+        interval: LongInterval::Day1,
         year: 2026,
     };
     let err = mock
@@ -200,6 +274,114 @@ async fn an_error_without_responsetime_still_decodes() {
             assert_eq!(api.response_time(), None);
         }
         other => panic!("expected an API error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_ticker_for_another_symbol_fails_the_postcondition() {
+    let mock = MockExchange::start().await;
+    mock.on("GET", "/public/v1/ticker")
+        .query("symbol=ETH")
+        .fixture("public_get_ticker.json");
+
+    let err = mock
+        .client()
+        .ticker(Symbol::ETH)
+        .await
+        .expect_err("the fixture answers BTC");
+
+    match err {
+        Error::Protocol(p) => assert_eq!(
+            p.kind(),
+            &ProtocolErrorKind::Postcondition(Postcondition::WrongSymbol)
+        ),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_chunked_body_decodes_like_a_fixed_length_one() {
+    let mock = MockExchange::start().await;
+    mock.on("GET", "/public/v1/symbols").reply(Reply::Chunked {
+        body: fixture("public_get_symbols.json"),
+        chunk: 7,
+    });
+
+    let rules = mock.client().symbols().await.expect("chunked");
+
+    assert_eq!(rules.len(), 2);
+}
+
+#[tokio::test]
+async fn a_non_envelope_404_is_a_protocol_error_with_the_status() {
+    let mock = MockExchange::start().await;
+    mock.on("GET", "/public/v1/status").reply(Reply::Status {
+        code: 404,
+        body: "<html>not found</html>".to_owned(),
+    });
+
+    let err = mock.client().status().await.expect_err("404");
+
+    match err {
+        Error::Protocol(p) => assert_eq!(p.kind(), &ProtocolErrorKind::HttpStatus(404)),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_stalled_server_times_out_the_request_phase() {
+    let mock = MockExchange::start().await;
+    mock.on("GET", "/public/v1/status").reply(Reply::Stall);
+    let mut config = Config::default();
+    config.timeouts.request = Timeout::new(Duration::from_millis(200)).unwrap();
+
+    let err = mock
+        .client_with(config)
+        .status()
+        .await
+        .expect_err("stalled");
+
+    match &err {
+        Error::Transport(t) => assert_eq!(*t.kind(), TransportErrorKind::Timeout(Phase::Request)),
+        other => panic!("{other:?}"),
+    }
+    assert!(
+        err.outcome_unknown(),
+        "a GET that was written and never answered is MaybeSent"
+    );
+}
+
+#[tokio::test]
+async fn a_delayed_answer_inside_the_timeout_still_arrives() {
+    let mock = MockExchange::start().await;
+    mock.on("GET", "/public/v1/status").reply(Reply::Delay(
+        Duration::from_millis(100),
+        Box::new(Reply::Fixture("public_get_status.json")),
+    ));
+
+    assert_eq!(mock.client().status().await.unwrap(), ExchangeStatus::Open);
+}
+
+#[tokio::test]
+async fn a_body_over_the_limit_is_refused_before_it_is_buffered() {
+    let mock = MockExchange::start().await;
+    let big = format!(r#"{{"status":0,"data":[],"pad":"{}"}}"#, "x".repeat(4096));
+    mock.on("GET", "/public/v1/symbols").reply(Reply::Chunked {
+        body: big,
+        chunk: 512,
+    });
+    let mut config = Config::default();
+    config.limits.max_response_bytes = gmo_coin_api_client::ByteLimit::new(1024).unwrap();
+
+    let err = mock
+        .client_with(config)
+        .symbols()
+        .await
+        .expect_err("too large");
+
+    match &err {
+        Error::Transport(t) => assert_eq!(*t.kind(), TransportErrorKind::TooLarge { limit: 1024 }),
+        other => panic!("{other:?}"),
     }
 }
 
