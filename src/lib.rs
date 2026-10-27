@@ -49,9 +49,6 @@
 //! - REST の呼び出しは絞らない。ERR-5003 は `Error::is_rate_limited` で見える。
 
 #![forbid(unsafe_code)]
-// フェーズ 2 (Private REST) とフェーズ 3 (WebSocket) の本体が `todo!()` の間、
-// それらにしか呼ばれないクレート内部の項目は未使用になる。
-#![allow(dead_code)]
 
 mod client;
 mod domain;
