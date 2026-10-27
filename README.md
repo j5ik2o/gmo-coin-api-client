@@ -1,0 +1,1 @@
+# gmo-coin-api-client
