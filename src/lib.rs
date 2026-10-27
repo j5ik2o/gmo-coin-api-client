@@ -4,7 +4,7 @@
 //! Public/Private WebSocket) を tokio 上で呼び出す非同期クライアント。
 //!
 //! ```no_run
-//! use gmo_coin_api_client::{Client, ClientOrderId, Credentials, LimitTimeInForce, Price, Side, Size, Symbol};
+//! use gmo_coin_api_client::{Client, ClientOrderId, Credentials, LimitTimeInForce, OrderPrice, OrderSize, Side, Symbol};
 //! use gmo_coin_api_client::rest::{NewOrder, OrderExecution};
 //!
 //! # async fn run() -> gmo_coin_api_client::Result<()> {
@@ -17,9 +17,9 @@
 //!     client_order_id: ClientOrderId::generate(),
 //!     symbol: Symbol::BTC,
 //!     side: Side::Buy,
-//!     size: Size::parse("0.001")?,
+//!     size: OrderSize::parse("0.001")?,
 //!     execution: OrderExecution::Limit {
-//!         price: Price::parse("9000000")?,
+//!         price: OrderPrice::parse("9000000")?,
 //!         time_in_force: LimitTimeInForce::Fas,
 //!         losscut_price: None,
 //!     },

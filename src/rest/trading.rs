@@ -1,27 +1,42 @@
-//! Private REST: orders, executions, positions. Every method here can move
-//! money or reveals account state, so they exist only on
-//! `Client<Authenticated>`.
+//! Private REST: 注文・約定・建玉。このファイルのメソッドはお金を動かすか
+//! 口座の状態を明かすので、`Client<Authenticated>` にだけ存在する。
+//!
+//! # パニック
+//! このファイルの関数はパニックしない。
+//!
+//! # 例
+//! ```no_run
+//! # async fn run() -> gmo_coin_api_client::Result<()> {
+//! use gmo_coin_api_client::{Client, Credentials, PageRequest, Symbol};
+//!
+//! let client = Client::production().authenticate(Credentials::from_env()?);
+//! let active = client.active_orders(Symbol::BTC, PageRequest::FIRST).await?;
+//! println!("{}", active.items().len());
+//! # Ok(()) }
+//! ```
 
 use serde::{Deserialize, Serialize};
 
 use super::envelope::{WireMessage, message};
-use super::order::{BulkCancel, BulkClose, ClosePosition, ExecutionLookup, NewOrder, OrderLookup};
-use super::{Call, Page, PageRequest, endpoint};
+use super::order::{
+    BulkCancel, BulkClose, ClosePosition, ExecutionLookup, NewOrder, OrderLookup, require_leverage,
+};
+use super::{Answer, Call, Page, PageRequest, endpoint};
 use crate::client::{Authenticated, Client};
 use crate::domain::{
-    Batch, CancelType, ClientOrderId, Decimal, ExecutionId, ExecutionType, Market, OrderId,
+    Batch, CancelType, ClientOrderId, Decimal, ExecutionId, ExecutionType, OrderId, OrderPrice,
     OrderStatus, OrderType, PositionId, Price, SettleType, Side, Size, Symbol, TimeInForce,
     Timestamp,
 };
-use crate::error::{ApiMessage, ContractViolation, Postcondition, ProtocolErrorKind, Result};
+use crate::error::{ApiMessage, Postcondition, ProtocolErrorKind, Result};
 
-/// An order as the exchange reports it (`GET /orders`, `GET /activeOrders`).
+/// 取引所が報告する注文 (`GET /orders`、`GET /activeOrders`)。
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Order {
     pub root_order_id: OrderId,
     pub order_id: OrderId,
-    /// Present only when the order was placed with one.
+    /// 注文時に指定したときだけ存在する。
     pub client_order_id: Option<ClientOrderId>,
     pub symbol: Symbol,
     pub side: Side,
@@ -30,25 +45,25 @@ pub struct Order {
     pub settle_type: SettleType,
     pub size: Size,
     pub executed_size: Size,
-    /// Absent for MARKET orders.
+    /// MARKET 注文では存在しない。
     pub price: Option<Price>,
-    /// `"0"` for spot orders and when unset.
+    /// 現物注文と未設定のときは `"0"`。
     pub losscut_price: Price,
     pub status: OrderStatus,
-    /// Present only for CANCELLING, CANCELED, EXPIRED.
+    /// CANCELLING、CANCELED、EXPIRED のときだけ存在する。
     pub cancel_type: Option<CancelType>,
     pub time_in_force: TimeInForce,
     pub timestamp: Timestamp,
 }
 
-/// A fill (`GET /executions`, `GET /latestExecutions`).
+/// 約定 (`GET /executions`、`GET /latestExecutions`)。
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Execution {
     pub execution_id: ExecutionId,
     pub order_id: OrderId,
     pub client_order_id: Option<ClientOrderId>,
-    /// Leverage only.
+    /// レバレッジのみ。
     pub position_id: Option<PositionId>,
     pub symbol: Symbol,
     pub side: Side,
@@ -56,12 +71,12 @@ pub struct Execution {
     pub size: Size,
     pub price: Price,
     pub loss_gain: Decimal,
-    /// Positive for taker, negative for maker.
+    /// taker は正、maker は負。
     pub fee: Decimal,
     pub timestamp: Timestamp,
 }
 
-/// An open leverage position (`GET /openPositions`).
+/// 建玉中のレバレッジ建玉 (`GET /openPositions`)。
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Position {
@@ -69,7 +84,7 @@ pub struct Position {
     pub symbol: Symbol,
     pub side: Side,
     pub size: Size,
-    /// Spelled `orderdSize` on the wire.
+    /// ワイヤ上の綴りは `orderdSize`。
     #[serde(rename = "orderdSize")]
     pub ordered_size: Size,
     pub price: Price,
@@ -79,7 +94,7 @@ pub struct Position {
     pub timestamp: Timestamp,
 }
 
-/// `GET /positionSummary`, one row per symbol and side.
+/// `GET /positionSummary`。銘柄と売買区分ごとに 1 行。
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PositionSummary {
@@ -91,64 +106,100 @@ pub struct PositionSummary {
     pub sum_position_quantity: Size,
 }
 
-/// `cancelOrders`' partial success. Not an error: some ids can be cancelled
-/// while others cannot, and the caller needs both lists.
+/// `cancelOrders` の部分成功。エラーではない。取り消せる id と取り消せない id が
+/// 混ざり得るので、呼び出し側は両方のリストを必要とする。
 ///
-/// # Invariants (checked when the answer is parsed)
-/// - Every id in `cancelled` and `rejected` is one the caller sent.
-/// - No id appears twice across both lists.
+/// # 不変条件
+/// 答えをパースするときに検査する。
+/// - `cancelled` と `rejected` の id はどれも、呼び出し側が送ったもの。
+/// - 同じ id が 2 つのリストをまたいで二度現れない。
+/// - `unaccounted` は、送ったのにどちらのリストにも現れなかった id。取消済みと
+///   みなしてはならない。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CancelOrdersOutcome {
     cancelled: Vec<OrderId>,
     rejected: Vec<CancelRejection>,
+    unaccounted: Vec<OrderId>,
 }
 
 impl CancelOrdersOutcome {
-    /// Accepted for cancellation (`data.success`). Accepted is not yet
-    /// cancelled: watch `orderEvents` or query `orders` for the final state.
+    /// 取消を受け付けた id (`data.success`)。受付は取消済みではない。最終状態は
+    /// `orderEvents` を見るか `orders` で調べる。
     pub fn cancelled(&self) -> &[OrderId] {
         &self.cancelled
     }
 
-    /// Refused, with the exchange's reason (`data.failed`).
+    /// 取引所の理由つきで拒否された id (`data.failed`)。
     pub fn rejected(&self) -> &[CancelRejection] {
         &self.rejected
     }
 
-    /// Checks the postconditions above against what was sent.
+    /// 送ったのに `success` にも `failed` にも現れなかった id。取引所は結果を
+    /// 答えていないので、取消済みとみなさず、`orders` で調べること。
+    pub fn unaccounted(&self) -> &[OrderId] {
+        &self.unaccounted
+    }
+
     fn from_wire(
         sent: &Batch<OrderId, 10>,
         wire: WireCancelOrders<'_>,
     ) -> core::result::Result<Self, ProtocolErrorKind> {
-        let violation = |p| ProtocolErrorKind::Postcondition(p);
-        let mut seen: Vec<OrderId> = Vec::with_capacity(sent.as_slice().len());
-        let mut note = |id: OrderId| {
-            if !sent.contains(&id) {
-                return Err(violation(Postcondition::CancelResultIdNotRequested(id)));
-            }
-            if seen.contains(&id) {
-                return Err(violation(Postcondition::CancelResultIdRepeated(id)));
-            }
-            seen.push(id);
-            Ok(())
-        };
-        for id in &wire.success {
-            note(*id)?;
-        }
-        let mut rejected = Vec::with_capacity(wire.failed.len());
+        let mut failed = Vec::with_capacity(wire.failed.len());
         for f in &wire.failed {
-            note(f.order_id)?;
             let message = message(&f.message).ok_or(ProtocolErrorKind::MalformedErrorEnvelope)?;
-            rejected.push(CancelRejection {
+            failed.push(CancelRejection {
                 order_id: f.order_id,
                 message,
             });
         }
-        Ok(Self {
-            cancelled: wire.success,
-            rejected,
-        })
+        check_cancel_outcome(sent.as_slice(), wire.success, failed)
+            .map_err(ProtocolErrorKind::Postcondition)
     }
+}
+
+/// `cancelOrders` の事後条件を、送った id に照らして検査する純粋関数。
+///
+/// # 事前条件
+/// `sent` は呼び出し側が送った id (重複なし)。
+///
+/// # 事後条件
+/// `Ok` なら、`success` と `failed` のすべての id は `sent` にあり、どの id も
+/// 二度現れず、`unaccounted` は `sent` のうちどちらにも現れなかった id を
+/// `sent` の順に並べたもの。
+///
+/// # エラー
+/// - `CancelResultIdNotRequested`: 送っていない id が結果にある。
+/// - `CancelResultIdRepeated`: 同じ id が二度ある (`success` の中、`failed` の
+///   中、またはその間)。
+fn check_cancel_outcome(
+    sent: &[OrderId],
+    success: Vec<OrderId>,
+    failed: Vec<CancelRejection>,
+) -> core::result::Result<CancelOrdersOutcome, Postcondition> {
+    let mut seen: Vec<OrderId> = Vec::with_capacity(sent.len());
+    let ids = success
+        .iter()
+        .copied()
+        .chain(failed.iter().map(|f| f.order_id));
+    for id in ids {
+        if !sent.contains(&id) {
+            return Err(Postcondition::CancelResultIdNotRequested(id));
+        }
+        if seen.contains(&id) {
+            return Err(Postcondition::CancelResultIdRepeated(id));
+        }
+        seen.push(id);
+    }
+    let unaccounted = sent
+        .iter()
+        .copied()
+        .filter(|id| !seen.contains(id))
+        .collect();
+    Ok(CancelOrdersOutcome {
+        cancelled: success,
+        rejected: failed,
+        unaccounted,
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -172,37 +223,82 @@ struct WireFailure<'a> {
     message: WireMessage<'a>,
 }
 
+/// ページ番号を持たない `{"list": [...]}` の形 (`orders`、`executions`、
+/// `positionSummary`)。`Page` と同じく、空の結果の `{}` も受け付ける。
+/// 公式ドキュメントにない形で、本番で確かめる必要がある (SYNTHESIS の未解決事項)。
+#[derive(Deserialize)]
+struct List<T> {
+    #[serde(default = "Vec::new")]
+    list: Vec<T>,
+}
+
 impl Client<Authenticated> {
-    /// `GET /private/v1/orders`.
+    /// `GET /private/v1/orders`。
     ///
-    /// # Preconditions
-    /// Carried by [`OrderLookup`]: exactly one id kind, 1 to 10 ids.
+    /// # 事前条件
+    /// [`OrderLookup`] が保証する: id の種類はちょうど 1 つ、1 件から 10 件。
     ///
-    /// # Postconditions
-    /// Every returned order matches one requested id
-    /// (`Protocol(Postcondition(OrderNotRequested))` otherwise). An id the
-    /// exchange does not know is simply absent.
+    /// # 事後条件
+    /// 返された注文はどれも要求した id のどれかに一致する (そうでなければ
+    /// `Protocol(Postcondition(OrderNotRequested))`)。取引所が知らない id は
+    /// 単に含まれない。
     ///
-    /// # Errors
-    /// The [REST set](crate::rest#errors).
+    /// # エラー
+    /// [REST 共通の集合](crate::rest#エラー)。
+    ///
+    /// # 例
+    /// ```no_run
+    /// # async fn run(client: gmo_coin_api_client::Client<gmo_coin_api_client::Authenticated>) -> gmo_coin_api_client::Result<()> {
+    /// use gmo_coin_api_client::{Batch, ClientOrderId};
+    /// use gmo_coin_api_client::rest::OrderLookup;
+    /// let ids = Batch::one(ClientOrderId::parse("abc123")?);
+    /// let orders = client.orders(&OrderLookup::ByClientOrderIds(ids)).await?;
+    /// println!("{}", orders.len());
+    /// # Ok(()) }
+    /// ```
     pub async fn orders(&self, lookup: &OrderLookup) -> Result<Vec<Order>> {
-        let _ = lookup;
-        todo!()
+        let (key, value) = lookup.query();
+        let call = Call::new(endpoint!(GET "/v1/orders")).query(key, value);
+        let answer = self.private(call).await?;
+        let wrong = |order: &Order| {
+            answer.protocol(ProtocolErrorKind::Postcondition(
+                Postcondition::OrderNotRequested(order.order_id),
+            ))
+        };
+        let orders: Vec<Order> = decode_list(&answer)?;
+        let requested = |order: &Order| match lookup {
+            OrderLookup::ByOrderIds(ids) => ids.contains(&order.order_id),
+            OrderLookup::ByClientOrderIds(ids) => order
+                .client_order_id
+                .as_ref()
+                .is_some_and(|id| ids.contains(id)),
+        };
+        match orders.iter().find(|o| !requested(o)) {
+            Some(stray) => Err(wrong(stray)),
+            None => Ok(orders),
+        }
     }
 
-    /// `GET /private/v1/activeOrders?symbol=&page=&count=`. The example of a
-    /// paginated private GET.
+    /// `GET /private/v1/activeOrders?symbol=&page=&count=`。ページ番号で区切られた
+    /// Private GET の例。
     ///
-    /// # Preconditions
-    /// Carried by [`PageRequest`].
+    /// # 事前条件
+    /// [`PageRequest`] が保証する。
     ///
-    /// # Postconditions
-    /// At most `page.count()` items. An empty result is `Ok` with no items,
-    /// whichever of the two empty shapes the exchange sent.
+    /// # 事後条件
+    /// 空の結果は、取引所がどちらの空の形で答えても、項目なしの `Ok`。
     ///
-    /// # Errors
-    /// `Api` (ERR-5003 when over the account's tier limit), `Protocol`,
-    /// `Transport`.
+    /// # エラー
+    /// `Api` (口座の階層の上限を超えると ERR-5003)、`Protocol`、`Transport`。
+    ///
+    /// # 例
+    /// ```no_run
+    /// # async fn run(client: gmo_coin_api_client::Client<gmo_coin_api_client::Authenticated>) -> gmo_coin_api_client::Result<()> {
+    /// use gmo_coin_api_client::{PageRequest, Symbol};
+    /// let page = client.active_orders(Symbol::BTC, PageRequest::FIRST).await?;
+    /// println!("{}", page.items().len());
+    /// # Ok(()) }
+    /// ```
     pub async fn active_orders(&self, symbol: Symbol, page: PageRequest) -> Result<Page<Order>> {
         let call = Call::new(endpoint!(GET "/v1/activeOrders"))
             .query("symbol", symbol)
@@ -211,130 +307,236 @@ impl Client<Authenticated> {
         self.private(call).await?.data()
     }
 
-    /// `GET /private/v1/executions`.
+    /// `GET /private/v1/executions`。
     ///
-    /// # Preconditions
-    /// Carried by [`ExecutionLookup`]: exactly one id kind, executionIds 1 to 10.
+    /// # 事前条件
+    /// [`ExecutionLookup`] が保証する: id の種類はちょうど 1 つ、`executionId` は
+    /// 1 件から 10 件。
     ///
-    /// # Postconditions
-    /// Every returned execution matches the lookup.
+    /// # 事後条件
+    /// 送られたままの約定。応答の約定が検索条件に一致するかは検査しない
+    /// (`Postcondition` に該当する variant がない)。
     ///
-    /// # Errors
-    /// The [REST set](crate::rest#errors).
+    /// # エラー
+    /// [REST 共通の集合](crate::rest#エラー)。
+    ///
+    /// # 例
+    /// ```no_run
+    /// # async fn run(client: gmo_coin_api_client::Client<gmo_coin_api_client::Authenticated>) -> gmo_coin_api_client::Result<()> {
+    /// use gmo_coin_api_client::OrderId;
+    /// use gmo_coin_api_client::rest::ExecutionLookup;
+    /// let fills = client.executions(&ExecutionLookup::ByOrderId(OrderId::new(223456789)?)).await?;
+    /// println!("{}", fills.len());
+    /// # Ok(()) }
+    /// ```
     pub async fn executions(&self, lookup: &ExecutionLookup) -> Result<Vec<Execution>> {
-        let _ = lookup;
-        todo!()
+        let (key, value) = lookup.query();
+        let call = Call::new(endpoint!(GET "/v1/executions")).query(key, value);
+        decode_list(&self.private(call).await?)
     }
 
-    /// `GET /private/v1/latestExecutions?symbol=&page=&count=`: the last day.
+    /// `GET /private/v1/latestExecutions?symbol=&page=&count=`: 直近 1 日。
     ///
-    /// # Preconditions
-    /// Carried by [`PageRequest`].
+    /// # 事前条件
+    /// [`PageRequest`] が保証する。
     ///
-    /// # Postconditions
-    /// At most `page.count()` items, newest first.
+    /// # 事後条件
+    /// 送られたままの順序 (取引所は新しい順で返す)。
     ///
-    /// # Errors
-    /// The [REST set](crate::rest#errors).
+    /// # エラー
+    /// [REST 共通の集合](crate::rest#エラー)。
+    ///
+    /// # 例
+    /// ```no_run
+    /// # async fn run(client: gmo_coin_api_client::Client<gmo_coin_api_client::Authenticated>) -> gmo_coin_api_client::Result<()> {
+    /// use gmo_coin_api_client::{PageRequest, Symbol};
+    /// let page = client.latest_executions(Symbol::BTC, PageRequest::FIRST).await?;
+    /// println!("{}", page.items().len());
+    /// # Ok(()) }
+    /// ```
     pub async fn latest_executions(
         &self,
         symbol: Symbol,
         page: PageRequest,
     ) -> Result<Page<Execution>> {
-        let _ = (symbol, page);
-        todo!()
+        let call = Call::new(endpoint!(GET "/v1/latestExecutions"))
+            .query("symbol", symbol)
+            .query("page", page.page())
+            .query("count", page.count());
+        self.private(call).await?.data()
     }
 
-    /// `GET /private/v1/openPositions?symbol=&page=&count=`.
+    /// `GET /private/v1/openPositions?symbol=&page=&count=`。
     ///
-    /// # Preconditions
-    /// `symbol` is a leverage symbol (`Contract(RequiresLeverageSymbol)`);
-    /// `page` carried by [`PageRequest`].
+    /// # 事前条件
+    /// `symbol` はレバレッジ銘柄 (そうでなければ
+    /// `Contract(RequiresLeverageSymbol)`)。`page` は [`PageRequest`] が保証する。
     ///
-    /// # Postconditions
-    /// At most `page.count()` items, all for `symbol`.
+    /// # 事後条件
+    /// 空の結果は項目なしの `Ok`。
     ///
-    /// # Errors
-    /// The [REST set](crate::rest#errors).
+    /// # エラー
+    /// `Contract`: 現物銘柄。リクエストは作られない。ほかは
+    /// [REST 共通の集合](crate::rest#エラー)。
+    ///
+    /// # 例
+    /// ```no_run
+    /// # async fn run(client: gmo_coin_api_client::Client<gmo_coin_api_client::Authenticated>) -> gmo_coin_api_client::Result<()> {
+    /// use gmo_coin_api_client::{PageRequest, Symbol};
+    /// let page = client.open_positions(Symbol::BTC_JPY, PageRequest::FIRST).await?;
+    /// println!("{}", page.items().len());
+    /// # Ok(()) }
+    /// ```
     pub async fn open_positions(
         &self,
         symbol: Symbol,
         page: PageRequest,
     ) -> Result<Page<Position>> {
-        let _ = (symbol, page);
-        todo!()
+        require_leverage(&symbol)?;
+        let call = Call::new(endpoint!(GET "/v1/openPositions"))
+            .query("symbol", symbol)
+            .query("page", page.page())
+            .query("count", page.count());
+        self.private(call).await?.data()
     }
 
-    /// `GET /private/v1/positionSummary[?symbol=]`.
+    /// `GET /private/v1/positionSummary[?symbol=]`。
     ///
-    /// # Preconditions
-    /// `symbol`, when given, is a leverage symbol (`Contract(RequiresLeverageSymbol)`).
+    /// # 事前条件
+    /// 指定する場合、`symbol` はレバレッジ銘柄 (そうでなければ
+    /// `Contract(RequiresLeverageSymbol)`)。
     ///
-    /// # Postconditions
-    /// One row per symbol and side held.
+    /// # 事後条件
+    /// 保有している銘柄と売買区分ごとに 1 行。
     ///
-    /// # Errors
-    /// The [REST set](crate::rest#errors).
+    /// # エラー
+    /// `Contract`: 現物銘柄。リクエストは作られない。ほかは
+    /// [REST 共通の集合](crate::rest#エラー)。
+    ///
+    /// # 例
+    /// ```no_run
+    /// # async fn run(client: gmo_coin_api_client::Client<gmo_coin_api_client::Authenticated>) -> gmo_coin_api_client::Result<()> {
+    /// let rows = client.position_summary(None).await?;
+    /// println!("{}", rows.len());
+    /// # Ok(()) }
+    /// ```
     pub async fn position_summary(&self, symbol: Option<Symbol>) -> Result<Vec<PositionSummary>> {
-        let _ = symbol;
-        todo!()
+        let mut call = Call::new(endpoint!(GET "/v1/positionSummary"));
+        if let Some(symbol) = symbol {
+            require_leverage(&symbol)?;
+            call = call.query("symbol", symbol);
+        }
+        decode_list(&self.private(call).await?)
     }
 
-    /// `POST /private/v1/order`.
+    /// `POST /private/v1/order`。
     ///
-    /// # Preconditions
-    /// Carried by [`NewOrder`] and [`OrderExecution`](super::OrderExecution)
-    /// (price iff LIMIT/STOP, `timeInForce` only on LIMIT, a valid
-    /// `ClientOrderId`), plus two checked here before sending:
-    /// `MarketCancelBefore` needs a spot symbol and `Side::Sell`, and
-    /// `losscut_price` needs a leverage symbol.
+    /// # 事前条件
+    /// [`NewOrder`] と [`OrderExecution`](super::OrderExecution) が保証する
+    /// (LIMIT/STOP にだけ価格、LIMIT にだけ `timeInForce`、ゼロでない数量と価格、
+    /// 正しい `ClientOrderId`)。加えて、送信前に次の 2 つを検査する。
+    /// `MarketCancelBefore` は現物銘柄の `Side::Sell` のみ、`losscut_price` は
+    /// レバレッジ銘柄のみ。
     ///
-    /// # Postconditions
-    /// `Ok(id)` means the exchange accepted the order, not that it filled.
+    /// # 事後条件
+    /// `Ok(id)` は、取引所が注文を受け付けたことを意味する。約定したことではない。
     ///
-    /// # Errors
-    /// - `Contract(..)` for a failed precondition. Nothing was sent.
-    /// - `Api` with ERR-915 when `client_order_id` was already used: the
-    ///   order exists; look it up with `OrderLookup::ByClientOrderIds`.
-    /// - `Transport` with `outcome_unknown() == true`: resend the same
-    ///   `NewOrder` (same `client_order_id`). It is placed at most once.
+    /// # エラー
+    /// - `Contract(..)`: 事前条件の違反。何も送られていない。
+    /// - `Api` の ERR-915: `client_order_id` が使用済み。注文は存在するので、
+    ///   `OrderLookup::ByClientOrderIds` で調べる。
+    /// - `Transport` で `outcome_unknown() == true`: 同じ `NewOrder`
+    ///   (同じ `client_order_id`) を再送する。発注されるのは高々一度である。
+    ///
+    /// # 例
+    /// ```no_run
+    /// # async fn run(client: gmo_coin_api_client::Client<gmo_coin_api_client::Authenticated>) -> gmo_coin_api_client::Result<()> {
+    /// use gmo_coin_api_client::{ClientOrderId, LimitTimeInForce, OrderPrice, OrderSize, Side, Symbol};
+    /// use gmo_coin_api_client::rest::{NewOrder, OrderExecution};
+    /// let order = NewOrder {
+    ///     client_order_id: ClientOrderId::generate(),
+    ///     symbol: Symbol::BTC,
+    ///     side: Side::Buy,
+    ///     size: OrderSize::parse("0.001")?,
+    ///     execution: OrderExecution::Limit {
+    ///         price: OrderPrice::parse("9000000")?,
+    ///         time_in_force: LimitTimeInForce::Fas,
+    ///         losscut_price: None,
+    ///     },
+    /// };
+    /// let id = match client.place_order(&order).await {
+    ///     Err(e) if e.outcome_unknown() => client.place_order(&order).await?,
+    ///     other => other?,
+    /// };
+    /// println!("{id}");
+    /// # Ok(()) }
+    /// ```
     pub async fn place_order(&self, order: &NewOrder) -> Result<OrderId> {
         order.check()?;
         let call = Call::new(endpoint!(POST "/v1/order")).json(&order.wire());
         self.private(call).await?.data()
     }
 
-    /// `POST /private/v1/changeOrder`.
+    /// `POST /private/v1/changeOrder`。
     ///
-    /// # Preconditions
-    /// `losscut_price` only for leverage orders (the exchange answers ERR-5118 otherwise; the order's market is not known locally).
+    /// # 事前条件
+    /// `price` と `losscut_price` はゼロでない ([`OrderPrice`])。`losscut_price` は
+    /// レバレッジの注文のみ。注文の市場はローカルでは分からないので、
+    /// 取引所が ERR-5118 で答える。
     ///
-    /// # Postconditions
-    /// `Ok` means the change was accepted.
+    /// # 事後条件
+    /// `Ok` は、変更が受け付けられたことを意味する。
     ///
-    /// # Errors
-    /// The [REST set](crate::rest#errors).
+    /// # エラー
+    /// [REST 共通の集合](crate::rest#エラー)。
+    ///
+    /// # 例
+    /// ```no_run
+    /// # async fn run(client: gmo_coin_api_client::Client<gmo_coin_api_client::Authenticated>) -> gmo_coin_api_client::Result<()> {
+    /// use gmo_coin_api_client::{OrderId, OrderPrice};
+    /// client.change_order(OrderId::new(123456789)?, OrderPrice::parse("9100000")?, None).await?;
+    /// # Ok(()) }
+    /// ```
     pub async fn change_order(
         &self,
         order_id: OrderId,
-        price: Price,
-        losscut_price: Option<Price>,
+        price: OrderPrice,
+        losscut_price: Option<OrderPrice>,
     ) -> Result<()> {
-        let _ = (order_id, price, losscut_price);
-        todo!()
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Body {
+            order_id: OrderId,
+            price: OrderPrice,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            losscut_price: Option<OrderPrice>,
+        }
+        let call = Call::new(endpoint!(POST "/v1/changeOrder")).json(&Body {
+            order_id,
+            price,
+            losscut_price,
+        });
+        self.private(call).await?.empty()
     }
 
-    /// `POST /private/v1/cancelOrder`.
+    /// `POST /private/v1/cancelOrder`。
     ///
-    /// # Preconditions
-    /// None beyond the argument types.
+    /// # 事前条件
+    /// 引数の型以外になし。
     ///
-    /// # Postconditions
-    /// `Ok` means the cancel was accepted. The order may still fill before it
-    /// is cancelled; the final state arrives as an `orderEvents` message.
+    /// # 事後条件
+    /// `Ok` は、取消が受け付けられたことを意味する。取り消される前に約定する
+    /// こともある。最終状態は `orderEvents` のメッセージで届く。
     ///
-    /// # Errors
-    /// The [REST set](crate::rest#errors); ERR-5122 when the order can no longer be cancelled.
+    /// # エラー
+    /// [REST 共通の集合](crate::rest#エラー)。注文がもう取り消せないとき ERR-5122。
+    ///
+    /// # 例
+    /// ```no_run
+    /// # async fn run(client: gmo_coin_api_client::Client<gmo_coin_api_client::Authenticated>) -> gmo_coin_api_client::Result<()> {
+    /// client.cancel_order(gmo_coin_api_client::OrderId::new(123456789)?).await?;
+    /// # Ok(()) }
+    /// ```
     pub async fn cancel_order(&self, order_id: OrderId) -> Result<()> {
         #[derive(Serialize)]
         #[serde(rename_all = "camelCase")]
@@ -345,19 +547,29 @@ impl Client<Authenticated> {
         self.private(call).await?.empty()
     }
 
-    /// `POST /private/v1/cancelOrders`: up to 10 orders, partial success.
+    /// `POST /private/v1/cancelOrders`: 最大 10 件、部分成功あり。
     ///
-    /// # Preconditions
-    /// Carried by `Batch<OrderId, 10>`: 1 to 10 distinct ids. Building a
-    /// batch of 11 fails before any request exists.
+    /// # 事前条件
+    /// `Batch<OrderId, 10>` が保証する: 1 件から 10 件の相異なる id。11 件の
+    /// バッチは、リクエストが存在する前に作れない。
     ///
-    /// # Postconditions
-    /// Every id in the outcome is one of `order_ids`, and none appears twice;
-    /// otherwise `Protocol(Postcondition(..))`. A mix of cancelled and
-    /// rejected ids is `Ok`.
+    /// # 事後条件
+    /// 結果の id はどれも `order_ids` のどれかで、二度現れない (そうでなければ
+    /// `Protocol(Postcondition(..))`)。取消済みと拒否が混ざっていても `Ok`。
+    /// 送ったのに結果に現れなかった id は `unaccounted()` に入る。
     ///
-    /// # Errors
-    /// The [REST set](crate::rest#errors).
+    /// # エラー
+    /// [REST 共通の集合](crate::rest#エラー)。
+    ///
+    /// # 例
+    /// ```no_run
+    /// # async fn run(client: gmo_coin_api_client::Client<gmo_coin_api_client::Authenticated>) -> gmo_coin_api_client::Result<()> {
+    /// use gmo_coin_api_client::{Batch, OrderId};
+    /// let ids = Batch::new(vec![OrderId::new(1)?, OrderId::new(2)?])?;
+    /// let outcome = client.cancel_orders(&ids).await?;
+    /// println!("{} 件受付, {} 件拒否", outcome.cancelled().len(), outcome.rejected().len());
+    /// # Ok(()) }
+    /// ```
     pub async fn cancel_orders(
         &self,
         order_ids: &Batch<OrderId, 10>,
@@ -371,77 +583,254 @@ impl Client<Authenticated> {
             order_ids: order_ids.as_slice(),
         });
         let answer = self.private(call).await?;
-        // TODO decode WireCancelOrders from the answer's raw data (borrowed),
-        // then CancelOrdersOutcome::from_wire(order_ids, wire)
-        //     .map_err(|kind| answer.protocol(kind))
-        let _ = (answer, CancelOrdersOutcome::from_wire);
-        todo!()
+        let Some(raw) = answer.raw() else {
+            return Err(answer.protocol(ProtocolErrorKind::MissingData));
+        };
+        let wire: WireCancelOrders<'_> =
+            serde_json::from_str(raw).map_err(|e| answer.shape_error(&e))?;
+        CancelOrdersOutcome::from_wire(order_ids, wire).map_err(|kind| answer.protocol(kind))
     }
 
-    /// `POST /private/v1/cancelBulkOrder`: ids accepted for cancellation.
+    /// `POST /private/v1/cancelBulkOrder`: 取消を受け付けた id。
     ///
-    /// # Preconditions
-    /// `filter.symbols` is non-empty.
+    /// # 事前条件
+    /// `filter.symbols` は空でない (そうでなければ `Contract(InvalidValue)`)。
     ///
-    /// # Postconditions
-    /// At most 10 ids.
+    /// # 事後条件
+    /// 送られたままの id。ドキュメントは最大 10 件とするが、それは検査しない
+    /// (`Postcondition` に該当する variant がない)。
     ///
-    /// # Errors
-    /// The [REST set](crate::rest#errors).
+    /// # エラー
+    /// `Contract`: `symbols` が空。リクエストは作られない。ほかは
+    /// [REST 共通の集合](crate::rest#エラー)。
+    ///
+    /// # 例
+    /// ```no_run
+    /// # async fn run(client: gmo_coin_api_client::Client<gmo_coin_api_client::Authenticated>) -> gmo_coin_api_client::Result<()> {
+    /// use gmo_coin_api_client::Symbol;
+    /// use gmo_coin_api_client::rest::BulkCancel;
+    /// let filter = BulkCancel { symbols: vec![Symbol::BTC], side: None, settle_type: None, newest_first: false };
+    /// let ids = client.cancel_bulk_orders(&filter).await?;
+    /// println!("{}", ids.len());
+    /// # Ok(()) }
+    /// ```
     pub async fn cancel_bulk_orders(&self, filter: &BulkCancel) -> Result<Vec<OrderId>> {
-        let _ = filter;
-        todo!()
+        filter.check()?;
+        let call = Call::new(endpoint!(POST "/v1/cancelBulkOrder")).json(&filter.wire());
+        self.private(call).await?.data()
     }
 
-    /// `POST /private/v1/closeOrder`.
+    /// `POST /private/v1/closeOrder`。
     ///
-    /// # Preconditions
-    /// `request.symbol` is a leverage symbol (`Contract(RequiresLeverageSymbol)`).
+    /// # 事前条件
+    /// `request.symbol` はレバレッジ銘柄 (そうでなければ
+    /// `Contract(RequiresLeverageSymbol)`)。
     ///
-    /// # Postconditions
-    /// `Ok(id)` means the close order was accepted.
+    /// # 事後条件
+    /// `Ok(id)` は、決済注文が受け付けられたことを意味する。
     ///
-    /// # Errors
-    /// The [REST set](crate::rest#errors); ERR-70 for the wrong closing side,
-    /// ERR-254 for an unknown position, ERR-915 for a reused `client_order_id`.
+    /// # エラー
+    /// `Contract`: 現物銘柄。リクエストは作られない。ほかは
+    /// [REST 共通の集合](crate::rest#エラー)。決済する側が違うとき ERR-70、
+    /// 建玉が存在しないとき ERR-254、`client_order_id` の再利用で ERR-915。
+    ///
+    /// # 例
+    /// ```no_run
+    /// # async fn run(client: gmo_coin_api_client::Client<gmo_coin_api_client::Authenticated>) -> gmo_coin_api_client::Result<()> {
+    /// use gmo_coin_api_client::{ClientOrderId, OrderSize, PositionId, Side, Symbol};
+    /// use gmo_coin_api_client::rest::{CloseExecution, ClosePosition};
+    /// let id = client.close_position(&ClosePosition {
+    ///     client_order_id: ClientOrderId::generate(),
+    ///     symbol: Symbol::BTC_JPY,
+    ///     side: Side::Sell,
+    ///     position_id: PositionId::new(1234567)?,
+    ///     size: OrderSize::parse("0.01")?,
+    ///     execution: CloseExecution::Market,
+    /// }).await?;
+    /// println!("{id}");
+    /// # Ok(()) }
+    /// ```
     pub async fn close_position(&self, request: &ClosePosition) -> Result<OrderId> {
-        if request.symbol.market() != Market::Leverage {
-            return Err(ContractViolation::RequiresLeverageSymbol.into());
-        }
-        todo!()
+        request.check()?;
+        let call = Call::new(endpoint!(POST "/v1/closeOrder")).json(&request.wire());
+        self.private(call).await?.data()
     }
 
-    /// `POST /private/v1/closeBulkOrder`.
+    /// `POST /private/v1/closeBulkOrder`。
     ///
-    /// # Preconditions
-    /// `request.symbol` is a leverage symbol (`Contract(RequiresLeverageSymbol)`).
+    /// # 事前条件
+    /// `request.symbol` はレバレッジ銘柄 (そうでなければ
+    /// `Contract(RequiresLeverageSymbol)`)。
     ///
-    /// # Postconditions
-    /// `Ok(id)` means the close order was accepted.
+    /// # 事後条件
+    /// `Ok(id)` は、決済注文が受け付けられたことを意味する。
     ///
-    /// # Errors
-    /// The [REST set](crate::rest#errors).
+    /// # エラー
+    /// `Contract`: 現物銘柄。リクエストは作られない。ほかは
+    /// [REST 共通の集合](crate::rest#エラー)。
+    ///
+    /// # 例
+    /// ```no_run
+    /// # async fn run(client: gmo_coin_api_client::Client<gmo_coin_api_client::Authenticated>) -> gmo_coin_api_client::Result<()> {
+    /// use gmo_coin_api_client::{ClientOrderId, OrderSize, Side, Symbol};
+    /// use gmo_coin_api_client::rest::{BulkClose, BulkCloseExecution};
+    /// let id = client.close_bulk(&BulkClose {
+    ///     client_order_id: ClientOrderId::generate(),
+    ///     symbol: Symbol::BTC_JPY,
+    ///     side: Side::Sell,
+    ///     size: OrderSize::parse("0.5")?,
+    ///     execution: BulkCloseExecution::Market,
+    /// }).await?;
+    /// println!("{id}");
+    /// # Ok(()) }
+    /// ```
     pub async fn close_bulk(&self, request: &BulkClose) -> Result<OrderId> {
-        let _ = request;
-        todo!()
+        request.check()?;
+        let call = Call::new(endpoint!(POST "/v1/closeBulkOrder")).json(&request.wire());
+        self.private(call).await?.data()
     }
 
-    /// `POST /private/v1/changeLosscutPrice`.
+    /// `POST /private/v1/changeLosscutPrice`。
     ///
-    /// # Preconditions
-    /// None beyond the argument types.
+    /// # 事前条件
+    /// `losscut_price` はゼロでない ([`OrderPrice`])。
     ///
-    /// # Postconditions
-    /// `Ok` means the change was accepted.
+    /// # 事後条件
+    /// `Ok` は、変更が受け付けられたことを意味する。
     ///
-    /// # Errors
-    /// The [REST set](crate::rest#errors).
+    /// # エラー
+    /// [REST 共通の集合](crate::rest#エラー)。
+    ///
+    /// # 例
+    /// ```no_run
+    /// # async fn run(client: gmo_coin_api_client::Client<gmo_coin_api_client::Authenticated>) -> gmo_coin_api_client::Result<()> {
+    /// use gmo_coin_api_client::{OrderPrice, PositionId};
+    /// client.change_losscut_price(PositionId::new(1234567)?, OrderPrice::parse("7000000")?).await?;
+    /// # Ok(()) }
+    /// ```
     pub async fn change_losscut_price(
         &self,
         position_id: PositionId,
-        losscut_price: Price,
+        losscut_price: OrderPrice,
     ) -> Result<()> {
-        let _ = (position_id, losscut_price);
-        todo!()
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Body {
+            position_id: PositionId,
+            losscut_price: OrderPrice,
+        }
+        let call = Call::new(endpoint!(POST "/v1/changeLosscutPrice")).json(&Body {
+            position_id,
+            losscut_price,
+        });
+        self.private(call).await?.empty()
+    }
+}
+
+/// `Answer` を消費せずに `{"list": [...]}` をデコードする。事後条件のエラーが
+/// 答えの文脈を必要とするため。
+fn decode_list<T: serde::de::DeserializeOwned>(answer: &Answer) -> Result<Vec<T>> {
+    let Some(raw) = answer.raw() else {
+        return Err(answer.protocol(ProtocolErrorKind::MissingData));
+    };
+    serde_json::from_str::<List<T>>(raw)
+        .map(|l| l.list)
+        .map_err(|e| answer.shape_error(&e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::ErrorCode as Code;
+
+    fn id(n: u64) -> OrderId {
+        OrderId::new(n).unwrap()
+    }
+
+    fn ids(ns: &[u64]) -> Vec<OrderId> {
+        ns.iter().map(|&n| id(n)).collect()
+    }
+
+    fn rejection(n: u64) -> CancelRejection {
+        CancelRejection {
+            order_id: id(n),
+            message: ApiMessage {
+                code: Code(5122),
+                text: "refused".into(),
+            },
+        }
+    }
+
+    #[test]
+    fn a_mix_of_accepted_and_rejected_ids_is_a_value() {
+        let outcome = check_cancel_outcome(
+            &ids(&[1, 2, 3, 4]),
+            ids(&[3, 4]),
+            vec![rejection(1), rejection(2)],
+        )
+        .unwrap();
+        assert_eq!(outcome.cancelled(), ids(&[3, 4]));
+        assert_eq!(outcome.rejected().len(), 2);
+        assert!(outcome.unaccounted().is_empty());
+    }
+
+    #[test]
+    fn an_id_sent_but_never_answered_is_unaccounted_not_cancelled() {
+        let outcome =
+            check_cancel_outcome(&ids(&[1, 2, 3, 4]), ids(&[3]), vec![rejection(1)]).unwrap();
+        assert_eq!(outcome.unaccounted(), ids(&[2, 4]));
+        assert!(!outcome.cancelled().contains(&id(2)));
+    }
+
+    #[test]
+    fn an_id_that_was_never_sent_is_refused_wherever_it_appears() {
+        assert_eq!(
+            check_cancel_outcome(&ids(&[1, 2]), ids(&[1, 9]), vec![]).unwrap_err(),
+            Postcondition::CancelResultIdNotRequested(id(9))
+        );
+        assert_eq!(
+            check_cancel_outcome(&ids(&[1, 2]), ids(&[1]), vec![rejection(7)]).unwrap_err(),
+            Postcondition::CancelResultIdNotRequested(id(7))
+        );
+    }
+
+    #[test]
+    fn an_id_reported_twice_is_refused_within_and_across_lists() {
+        let repeated = |r: core::result::Result<CancelOrdersOutcome, Postcondition>| r.unwrap_err();
+        assert_eq!(
+            repeated(check_cancel_outcome(&ids(&[1, 2]), ids(&[1, 1]), vec![])),
+            Postcondition::CancelResultIdRepeated(id(1))
+        );
+        assert_eq!(
+            repeated(check_cancel_outcome(
+                &ids(&[1, 2]),
+                ids(&[1]),
+                vec![rejection(1)]
+            )),
+            Postcondition::CancelResultIdRepeated(id(1))
+        );
+        assert_eq!(
+            repeated(check_cancel_outcome(
+                &ids(&[1, 2]),
+                vec![],
+                vec![rejection(2), rejection(2)]
+            )),
+            Postcondition::CancelResultIdRepeated(id(2))
+        );
+    }
+
+    #[test]
+    fn an_empty_answer_leaves_every_sent_id_unaccounted() {
+        let outcome = check_cancel_outcome(&ids(&[5, 6]), vec![], vec![]).unwrap();
+        assert_eq!(outcome.unaccounted(), ids(&[5, 6]));
+    }
+
+    #[test]
+    fn the_list_shape_accepts_a_list_and_the_empty_object() {
+        let full: List<u32> = serde_json::from_str(r#"{"list":[1,2]}"#).unwrap();
+        assert_eq!(full.list, [1, 2]);
+        let empty: List<u32> = serde_json::from_str("{}").unwrap();
+        assert!(empty.list.is_empty());
+        assert!(serde_json::from_str::<List<u32>>("[1]").is_err());
     }
 }
