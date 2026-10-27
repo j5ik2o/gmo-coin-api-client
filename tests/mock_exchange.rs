@@ -229,6 +229,47 @@ async fn assert_done_reports_unmatched_requests_and_missed_expectations() {
     );
 }
 
+#[tokio::test]
+async fn a_dropped_connection_still_records_the_real_signature_result() {
+    let mock = MockExchange::start().await;
+    mock.on("POST", "/private/v1/order")
+        .times(2)
+        .reply(support::Reply::DropConnection);
+    let order = gmo_coin_api_client::rest::NewOrder {
+        client_order_id: gmo_coin_api_client::ClientOrderId::parse("abc123").unwrap(),
+        symbol: gmo_coin_api_client::Symbol::BTC,
+        side: gmo_coin_api_client::Side::Buy,
+        size: gmo_coin_api_client::OrderSize::parse("0.02").unwrap(),
+        execution: gmo_coin_api_client::rest::OrderExecution::Market,
+    };
+    let wrong = gmo_coin_api_client::Credentials::new(
+        gmo_coin_api_client::ApiKey::new(TEST_KEY.to_owned()).unwrap(),
+        gmo_coin_api_client::ApiSecret::new("not-the-secret".to_owned()).unwrap(),
+    );
+
+    mock.client()
+        .authenticate(wrong)
+        .place_order(&order)
+        .await
+        .expect_err("dropped");
+    mock.client()
+        .authenticate(MockExchange::credentials())
+        .place_order(&order)
+        .await
+        .expect_err("dropped");
+
+    let signatures: Vec<SignatureCheck> = mock.requests().iter().map(|r| r.signature).collect();
+    assert_eq!(
+        signatures,
+        [SignatureCheck::Invalid, SignatureCheck::Valid],
+        "the drop happens after verification, not instead of it"
+    );
+    assert!(
+        mock.requests().iter().all(|r| !r.body.is_empty()),
+        "the body is read so the signature can be checked"
+    );
+}
+
 fn hmac_hex(ts: &str, method: &str, path: &str, body: &str) -> String {
     let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, TEST_SECRET.as_bytes());
     let tag = ring::hmac::sign(&key, format!("{ts}{method}{path}{body}").as_bytes());
