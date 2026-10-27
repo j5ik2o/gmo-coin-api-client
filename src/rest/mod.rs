@@ -358,13 +358,85 @@ impl PageRequest {
     }
 }
 
+/// 取引所のリスト型オブジェクトの生の形。`list` と `pagination` を取り出し、
+/// それ以外のキーは数えるだけで捨てる。
+///
+/// 空の結果の形は `{}` だけなので、[`Page`] と `List` (`trading.rs`) は
+/// `other_keys` を見て「空」と「形の誤り」を分ける。`{"items": [...]}` の
+/// ように `list` を欠いて他のキーを持つオブジェクトを、空の結果として
+/// 読んでしまわないためである。`list` がある場合、他のキーは無視する。
+pub(crate) struct WireListing<T> {
+    pub(crate) list: Option<Vec<T>>,
+    pub(crate) pagination: Option<Pagination>,
+    pub(crate) other_keys: usize,
+}
+
+impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for WireListing<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> core::result::Result<Self, D::Error> {
+        use serde::de::{Error, IgnoredAny, MapAccess, Visitor};
+
+        #[derive(serde::Deserialize)]
+        #[serde(field_identifier, rename_all = "lowercase")]
+        enum Key {
+            List,
+            Pagination,
+            #[serde(other)]
+            Other,
+        }
+
+        struct ListingVisitor<T>(core::marker::PhantomData<T>);
+
+        impl<'de, T: serde::Deserialize<'de>> Visitor<'de> for ListingVisitor<T> {
+            type Value = WireListing<T>;
+
+            fn expecting(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                f.write_str("an object with optional list and pagination keys")
+            }
+
+            fn visit_map<M: MapAccess<'de>>(
+                self,
+                mut map: M,
+            ) -> core::result::Result<Self::Value, M::Error> {
+                let mut listing = WireListing {
+                    list: None,
+                    pagination: None,
+                    other_keys: 0,
+                };
+                while let Some(key) = map.next_key::<Key>()? {
+                    match key {
+                        Key::List => {
+                            if listing.list.is_some() {
+                                return Err(M::Error::duplicate_field("list"));
+                            }
+                            listing.list = Some(map.next_value()?);
+                        }
+                        Key::Pagination => {
+                            if listing.pagination.is_some() {
+                                return Err(M::Error::duplicate_field("pagination"));
+                            }
+                            listing.pagination = Some(map.next_value()?);
+                        }
+                        Key::Other => {
+                            map.next_value::<IgnoredAny>()?;
+                            listing.other_keys += 1;
+                        }
+                    }
+                }
+                Ok(listing)
+            }
+        }
+
+        d.deserialize_map(ListingVisitor(core::marker::PhantomData))
+    }
+}
+
 /// ページ番号で区切られたリストの 1 ページ。
 ///
 /// 取引所は 2 つの形を送り、どちらも明示的に受け付ける:
 /// `{"pagination": {...}, "list": [...]}` と、空の結果に対する `{}`。
 /// 後者は公式ドキュメントにない。本番 API が空の `activeOrders` にそう答えた
-/// 記憶に基づくもので、リリース前に本番で確かめる必要がある (DESIGN.md の
-/// 未解決事項を参照)。それ以外の形は `Protocol` エラーである。
+/// 記憶に基づくもので、本番で確かめる必要がある (未解決)。それ以外の形は
+/// `Protocol` エラーである。
 ///
 /// # 不変条件
 /// `pagination.is_none()` ならば `items.is_empty()`。
@@ -397,18 +469,12 @@ pub struct Pagination {
 }
 
 impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for Page<T> {
-    /// `{}` は空のページ。`pagination` と `list` がそろっていればそのページ。
-    /// 片方だけなら形の誤り。他のキーは無視する。
+    /// `{}` は空のページ。`pagination` と `list` がそろっていればそのページで、
+    /// 他のキーは無視する。片方だけ、または `{}` 以外で両方欠けていれば形の誤り。
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> core::result::Result<Self, D::Error> {
-        #[derive(serde::Deserialize)]
-        #[serde(bound(deserialize = "T: serde::Deserialize<'de>"))]
-        struct Wire<T> {
-            pagination: Option<Pagination>,
-            list: Option<Vec<T>>,
-        }
-        let wire = Wire::<T>::deserialize(d)?;
+        let wire = WireListing::<T>::deserialize(d)?;
         match (wire.pagination, wire.list) {
-            (None, None) => Ok(Page {
+            (None, None) if wire.other_keys == 0 => Ok(Page {
                 items: Vec::new(),
                 pagination: None,
             }),
@@ -417,7 +483,7 @@ impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for Page<T> {
                 pagination: Some(pagination),
             }),
             _ => Err(serde::de::Error::custom(
-                "pagination and list must come together",
+                "expected pagination and list together, or an empty object",
             )),
         }
     }
@@ -456,12 +522,26 @@ mod tests {
         );
         let empty: Page<u32> = serde_json::from_str("{}").unwrap();
         assert!(empty.items().is_empty() && empty.pagination().is_none());
+        let extra: Page<u32> = serde_json::from_str(
+            r#"{"pagination":{"currentPage":1,"count":1},"list":[7],"extra":true}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            extra.items(),
+            [7],
+            "unknown keys next to a list are ignored"
+        );
         assert!(serde_json::from_str::<Page<u32>>(r#"{"list":[1]}"#).is_err());
         assert!(
             serde_json::from_str::<Page<u32>>(r#"{"pagination":{"currentPage":1,"count":0}}"#)
                 .is_err()
         );
         assert!(serde_json::from_str::<Page<u32>>("[]").is_err());
+        assert!(
+            serde_json::from_str::<Page<u32>>(r#"{"items":[1]}"#).is_err(),
+            "a renamed list is a shape error, not an empty page"
+        );
+        assert!(serde_json::from_str::<Page<u32>>(r#"{"foo":1}"#).is_err());
     }
 
     #[test]

@@ -121,6 +121,33 @@ async fn orders_returns_an_empty_list_for_ids_the_exchange_does_not_know() {
 }
 
 #[tokio::test]
+async fn an_object_without_a_list_key_is_a_shape_error_not_an_empty_answer() {
+    let mock = MockExchange::start().await;
+    mock.on("GET", "/private/v1/orders").reply(Reply::Json(
+        r#"{"status":0,"data":{"items":[]}}"#.to_owned(),
+    ));
+    mock.on("GET", "/private/v1/activeOrders")
+        .reply(Reply::Json(r#"{"status":0,"data":{"foo":1}}"#.to_owned()));
+    let client = authed(&mock);
+
+    let orders = client
+        .orders(&OrderLookup::ByOrderIds(Batch::one(oid(1))))
+        .await
+        .expect_err("items is not list");
+    let active = client
+        .active_orders(Symbol::BTC, PageRequest::FIRST)
+        .await
+        .expect_err("foo is not a page");
+
+    for err in [orders, active] {
+        assert!(
+            matches!(&err, Error::Protocol(p) if matches!(p.kind(), ProtocolErrorKind::Shape { .. })),
+            "{err:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn an_order_that_was_not_asked_for_fails_the_postcondition() {
     let mock = MockExchange::start().await;
     mock.on("GET", "/private/v1/orders")

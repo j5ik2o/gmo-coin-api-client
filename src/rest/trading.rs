@@ -21,7 +21,7 @@ use super::envelope::{WireMessage, message};
 use super::order::{
     BulkCancel, BulkClose, ClosePosition, ExecutionLookup, NewOrder, OrderLookup, require_leverage,
 };
-use super::{Answer, Call, Page, PageRequest, endpoint};
+use super::{Answer, Call, Page, PageRequest, WireListing, endpoint};
 use crate::client::{Authenticated, Client};
 use crate::domain::{
     Batch, CancelType, ClientOrderId, Decimal, ExecutionId, ExecutionType, OrderId, OrderPrice,
@@ -245,11 +245,26 @@ struct WireFailure<'a> {
 
 /// ページ番号を持たない `{"list": [...]}` の形 (`orders`、`executions`、
 /// `positionSummary`)。`Page` と同じく、空の結果の `{}` も受け付ける。
-/// 公式ドキュメントにない形で、本番で確かめる必要がある (SYNTHESIS の未解決事項)。
-#[derive(Deserialize)]
+/// 公式ドキュメントにない形で、本番で確かめる必要がある (未解決)。
 struct List<T> {
-    #[serde(default = "Vec::new")]
     list: Vec<T>,
+}
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for List<T> {
+    /// `list` があればそれで、他のキーは無視する。`{}` は空のリスト。
+    /// `list` を欠いて他のキーを持つオブジェクトは形の誤り。
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> core::result::Result<Self, D::Error> {
+        let wire = WireListing::<T>::deserialize(d)?;
+        match wire.list {
+            Some(list) => Ok(List { list }),
+            None if wire.pagination.is_none() && wire.other_keys == 0 => {
+                Ok(List { list: Vec::new() })
+            }
+            None => Err(serde::de::Error::custom(
+                "expected a list or an empty object",
+            )),
+        }
+    }
 }
 
 impl Client<Authenticated> {
@@ -897,6 +912,17 @@ mod tests {
         assert_eq!(full.list, [1, 2]);
         let empty: List<u32> = serde_json::from_str("{}").unwrap();
         assert!(empty.list.is_empty());
+        let extra: List<u32> = serde_json::from_str(r#"{"list":[3],"extra":1}"#).unwrap();
+        assert_eq!(extra.list, [3], "unknown keys next to a list are ignored");
         assert!(serde_json::from_str::<List<u32>>("[1]").is_err());
+        assert!(
+            serde_json::from_str::<List<u32>>(r#"{"items":[1]}"#).is_err(),
+            "a renamed list is a shape error, not an empty list"
+        );
+        assert!(serde_json::from_str::<List<u32>>(r#"{"foo":1}"#).is_err());
+        assert!(
+            serde_json::from_str::<List<u32>>(r#"{"pagination":{"currentPage":1,"count":1}}"#)
+                .is_err()
+        );
     }
 }
