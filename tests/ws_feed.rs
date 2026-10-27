@@ -446,3 +446,37 @@ async fn a_flushed_command_followed_by_silence_does_not_trip_the_write_deadline(
     assert_eq!(ws.handshakes(Api::Public), 1, "the connection was kept");
     feed.close().await.unwrap();
 }
+
+/// 本番で観測した拒否の形 (`tests/fixtures/live/ws_public_error.json`) は
+/// `Rejected` になり、本文はサーバが送ったままである。フィードは閉じない。
+#[tokio::test]
+async fn a_server_rejection_is_yielded_with_its_text_and_the_feed_stays_open() {
+    let mock = MockExchange::start().await;
+    let ws = mock.ws();
+    let mut feed = fast_client(&mock, |_| {}).public_feed();
+    feed.subscribe(PublicChannel::Ticker(Symbol::BTC)).unwrap();
+
+    let driver = tokio::spawn(async move {
+        let event = feed.next().await;
+        (feed, event)
+    });
+    ws.subscribed(Api::Public, "ticker", Some("BTC"), WAIT)
+        .await;
+    ws.push(Api::Public, &fixture("live/ws_public_error.json"));
+    let (mut feed, event) = driver.await.unwrap();
+    match event.unwrap() {
+        PublicEvent::Rejected(text) => {
+            assert_eq!(&*text, "ERR-5106 Invalid request parameter. channel");
+        }
+        other => panic!("{other:?}"),
+    }
+
+    let driver = tokio::spawn(async move {
+        let event = feed.next().await;
+        (feed, event)
+    });
+    ws.push(Api::Public, &fixture("ws_public_ticker.json"));
+    let (feed, event) = driver.await.unwrap();
+    assert!(matches!(event, Ok(PublicEvent::Ticker(_))), "{event:?}");
+    feed.close().await.unwrap();
+}
