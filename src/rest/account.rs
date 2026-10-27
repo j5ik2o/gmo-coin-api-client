@@ -216,6 +216,10 @@ fn history_call(call: Call, window: HistoryWindow) -> Call {
 }
 
 impl Client<Authenticated> {
+    /// `exchange_fee_history` の `cursor` の上限 (バイト)。取引所の例は 40 文字
+    /// ほどで、これより長い値はリクエスト行を膨らませるだけである。
+    pub const MAX_CURSOR_BYTES: usize = 256;
+
     /// `GET /private/v1/account/margin`。
     ///
     /// # 事前条件
@@ -417,15 +421,16 @@ impl Client<Authenticated> {
     ///
     /// # 事前条件
     /// [`BusinessDateRange`] が保証する (7 日以内、`from <= to`)。`count` は
-    /// `1..=100` で、そうでなければ `Contract` (リクエストは作られない)。
-    /// `cursor` は同じ `range` で取得したページのものでなければならない。
+    /// `1..=100`、`cursor` は [`Self::MAX_CURSOR_BYTES`] 以下で、そうでなければ
+    /// `Contract` (リクエストは作られない)。`cursor` は同じ `range` で取得した
+    /// ページのものでなければならない。
     ///
     /// # 事後条件
     /// `next_cursor()` は、取引所が次ページがあると報告したときに限り `Some`。
     /// `cursor` はパーセントエンコードして送る。
     ///
     /// # エラー
-    /// - `Contract`: `count` が `1..=100` の外。
+    /// - `Contract`: `count` が `1..=100` の外、または `cursor` が長すぎる。
     /// - `Api` の ERR-5016: 取引所がタイムアウトした。ドキュメントは 1 回
     ///   再試行し、それでも駄目なら範囲を狭めるよう求めている。
     ///
@@ -456,6 +461,19 @@ impl Client<Authenticated> {
             return Err(InvalidValue {
                 primitive: Primitive::PageRequest,
                 violation: Violation::Semantics("count outside 1..=100"),
+            }
+            .into());
+        }
+        if let Some(cursor) = cursor
+            && cursor.len() > Self::MAX_CURSOR_BYTES
+        {
+            return Err(InvalidValue {
+                primitive: Primitive::Cursor,
+                violation: Violation::Size {
+                    min: 0,
+                    max: Self::MAX_CURSOR_BYTES,
+                    actual: cursor.len(),
+                },
             }
             .into());
         }

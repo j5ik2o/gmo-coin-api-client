@@ -63,6 +63,9 @@ pub enum Primitive {
     BaseUrl,
     Config,
     PageRequest,
+    /// `exchangeFee/history` の継続トークン。取引所から受け取った文字列を
+    /// 呼び出し側が渡し直すもので、長さだけを検査する。
+    Cursor,
 }
 
 /// 失敗した検証段階。検査が走る順に並んでいる。
