@@ -67,6 +67,11 @@ extern crate self as gmo_coin_api_client;
 #[path = "../tests/support/mod.rs"]
 pub(crate) mod mock;
 
+// README のコード例を doctest としてコンパイルし、API とずれないようにする。
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;
+
 pub use client::{
     Access, Anonymous, Authenticated, Backoff, ByteLimit, Client, Config, Limits, Timeout, Timeouts,
 };
