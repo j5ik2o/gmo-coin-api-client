@@ -93,8 +93,9 @@ enum State<C: FeedChannel> {
 struct Sent<C: FeedChannel> {
     subscribed: BTreeMap<<C as Codec>::Key, C>,
     /// 最後に書いたコマンドのうち、まだ返答で裏付けられていないもの。
-    /// サーバの拒否はこれに帰属する。subscribe はそのキーの最初のデータ
-    /// イベントで裏付けられ、拒否は 1 つのコマンドにしか帰属しない。
+    /// サーバの拒否はこれに帰属する。新しいキーの subscribe はそのキーの
+    /// 最初のデータイベントで裏付けられる。拒否は 1 つのコマンドにしか
+    /// 帰属しない。
     last: Option<Written<C>>,
 }
 
@@ -106,12 +107,15 @@ impl<C: FeedChannel> Sent<C> {
         }
     }
 
-    /// `channel` の最初のデータイベントが届いた: その subscribe は通った。
+    /// `key` のデータイベントが届いた。新しいキーの subscribe ならそれで
+    /// 通ったと分かる。置き換えは分からない: 古い購読のデータが同じキーで
+    /// 流れ続けるからである。
     fn confirmed(&mut self, key: &<C as Codec>::Key) {
-        if self
-            .last
-            .as_ref()
-            .is_some_and(|w| w.subscribe && w.channel.key() == *key)
+        if let Some(Written::Subscribe {
+            channel,
+            replaced: false,
+        }) = &self.last
+            && channel.key() == *key
         {
             self.last = None;
         }
@@ -122,22 +126,28 @@ impl<C: FeedChannel> Sent<C> {
     /// 外す。別のオプションで望み直した subscribe はまだ送っていない
     /// 別のコマンドだからである。
     fn rejected(&mut self, desired: &mut BTreeMap<<C as Codec>::Key, C>) -> Option<C> {
-        let written = self.last.take()?;
-        if written.subscribe {
-            let key = written.channel.key();
-            self.subscribed.remove(&key);
-            if desired.get(&key) == Some(&written.channel) {
-                desired.remove(&key);
+        match self.last.take()? {
+            Written::Subscribe { channel, .. } => {
+                let key = channel.key();
+                self.subscribed.remove(&key);
+                if desired.get(&key) == Some(&channel) {
+                    desired.remove(&key);
+                }
+                Some(channel)
             }
+            Written::Unsubscribe(channel) => Some(channel),
         }
-        Some(written.channel)
     }
 }
 
 /// この接続に書いた 1 つのコマンド。
-struct Written<C> {
-    channel: C,
-    subscribe: bool,
+enum Written<C> {
+    Subscribe {
+        channel: C,
+        /// この接続で同じキーの subscribe を置き換えた。
+        replaced: bool,
+    },
+    Unsubscribe(C),
 }
 
 pub(crate) struct Connection {
@@ -514,12 +524,13 @@ impl<C: FeedChannel> Session<C> {
                     return Some(Ok(self.drop_connection(live_failure(C::API, kind))));
                 }
                 let key = channel.key();
-                if subscribe {
-                    sent.subscribed.insert(key, channel.clone());
+                sent.last = Some(if subscribe {
+                    let replaced = sent.subscribed.insert(key, channel.clone()).is_some();
+                    Written::Subscribe { channel, replaced }
                 } else {
                     sent.subscribed.remove(&key);
-                }
-                sent.last = Some(Written { channel, subscribe });
+                    Written::Unsubscribe(channel)
+                });
                 conn.slot = None;
                 conn.flush_since.get_or_insert_with(Instant::now);
                 None

@@ -827,7 +827,7 @@ async fn a_rejected_subscribe_is_dropped_until_the_caller_subscribes_again() {
     assert!(matches!(event, Ok(PrivateEvent::Execution(_))), "{event:?}");
 
     feed.subscribe(PrivateChannel::OrderEvents).unwrap();
-    match feed.next().await.unwrap() {
+    match next_under_cancellation(&mut feed).await.unwrap() {
         PrivateEvent::Rejected { channel, text } => {
             assert_eq!(channel, Some(PrivateChannel::OrderEvents));
             assert_eq!(&*text, "ERR-5106 Invalid request parameter. channel");
@@ -863,7 +863,7 @@ async fn a_rejected_subscribe_is_dropped_until_the_caller_subscribes_again() {
     );
 
     feed.subscribe(PrivateChannel::OrderEvents).unwrap();
-    match feed.next().await.unwrap() {
+    match next_under_cancellation(&mut feed).await.unwrap() {
         PrivateEvent::Rejected { channel, .. } => {
             assert_eq!(channel, Some(PrivateChannel::OrderEvents));
         }
@@ -873,6 +873,83 @@ async fn a_rejected_subscribe_is_dropped_until_the_caller_subscribes_again() {
         order_subscribes(&ws),
         2,
         "a fresh subscribe call sends the command again"
+    );
+    feed.close().await.unwrap();
+}
+
+/// 同じキーを置き換える subscribe は、古い購読のデータでは裏付けられない。
+/// 置き換えが拒否されたら、間に古いデータが流れていても拒否は置き換えに
+/// 帰属し、置き換えは集合から外れる。
+///
+/// 順序の作り方: 置き換えを登録して `next` を 1 回だけポーリングし、ペーサの
+/// スロットを取らせる (スロットは打ち切りを越えて残る)。次に trade を push
+/// してモックに譲り、ソケットに載せる。続く `next` はスロットが既に来て
+/// いるので読む前に書き、その trade は置き換えの書き込みの後、モックの
+/// 拒否の前に読まれる。譲りが短すぎた場合に起きるのは偽の合格であって、
+/// 偽の失敗ではない。
+#[tokio::test]
+async fn a_rejected_replacement_is_not_confirmed_by_the_old_subscription_data() {
+    let mock = MockExchange::start().await;
+    let ws = mock.ws();
+    let mut feed = fast_client(&mock, |_| {}).public_feed();
+    let plain = PublicChannel::Trades {
+        symbol: Symbol::BTC,
+        taker_only: false,
+    };
+    let taker_only = PublicChannel::Trades {
+        symbol: Symbol::BTC,
+        taker_only: true,
+    };
+    feed.subscribe(plain.clone()).unwrap();
+
+    let driver = tokio::spawn(async move {
+        let event = feed.next().await;
+        (feed, event)
+    });
+    ws.subscribed(Api::Public, "trades", Some("BTC"), WAIT)
+        .await;
+    ws.push(Api::Public, &fixture("ws_public_trades.json"));
+    let (mut feed, event) = driver.await.unwrap();
+    assert!(matches!(event, Ok(PublicEvent::Trade(_))), "{event:?}");
+
+    ws.reject_subscribe(
+        Api::Public,
+        "trades",
+        "ERR-5106 Invalid request parameter. option",
+    );
+    feed.subscribe(taker_only.clone()).unwrap();
+    let claimed = tokio::time::timeout(Duration::ZERO, feed.next()).await;
+    assert!(
+        claimed.is_err(),
+        "the first poll only claims the slot: {claimed:?}"
+    );
+    ws.push(Api::Public, &fixture("ws_public_trades.json"));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        matches!(feed.next().await, Ok(PublicEvent::Trade(_))),
+        "the old subscription's trade is read after the replacement was written"
+    );
+    match feed.next().await.unwrap() {
+        PublicEvent::Rejected { channel, .. } => assert_eq!(channel, Some(taker_only.clone())),
+        other => panic!("{other:?}"),
+    }
+
+    let trades_subscribes = || {
+        ws.commands()
+            .iter()
+            .filter(|(_, _, c)| c["command"] == "subscribe" && c["channel"] == "trades")
+            .count()
+    };
+    assert_eq!(trades_subscribes(), 2);
+    feed.subscribe(taker_only.clone()).unwrap();
+    match feed.next().await.unwrap() {
+        PublicEvent::Rejected { channel, .. } => assert_eq!(channel, Some(taker_only)),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        trades_subscribes(),
+        3,
+        "the replacement left the desired set, so subscribing again sends it"
     );
     feed.close().await.unwrap();
 }
