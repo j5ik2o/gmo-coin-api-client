@@ -56,8 +56,7 @@ use std::time::SystemTime;
 
 use http_body_util::Full;
 use hyper::body::Bytes;
-use serde::Serialize;
-use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use crate::client::{Access, Authenticated, Client};
@@ -171,20 +170,21 @@ impl core::fmt::Debug for Answer {
 }
 
 impl Answer {
-    /// `data` を `T` としてデコードする。
+    /// `data` を `T` としてデコードする。答えを消費しないので、事後条件の
+    /// エラーは同じ答えから作れる。`T` は `data` の生テキストを借用してよい
+    /// (`WireCancelOrders<'a>` など)。
     ///
     /// # エラー
     /// `data` がなければ `Protocol(MissingData)`、`T` と一致しなければ
     /// `Protocol(Shape)`。既定値を補うことはない。
-    pub(crate) fn data<T: DeserializeOwned>(self) -> Result<T> {
-        let Some(raw) = &self.data else {
+    pub(crate) fn data<'a, T: Deserialize<'a>>(&'a self) -> Result<T> {
+        let Some(raw) = self.raw() else {
             return Err(self.protocol(ProtocolErrorKind::MissingData));
         };
         serde_json::from_str(raw).map_err(|e| self.shape_error(&e))
     }
 
-    /// `data` の生テキスト。借用デコード (`WireCancelOrders<'a>` など) や、
-    /// serde を通さずに値を取り出す呼び出し元のため。
+    /// `data` の生テキスト。
     pub(crate) fn raw(&self) -> Option<&str> {
         self.data.as_deref().map(String::as_str)
     }
@@ -205,7 +205,7 @@ impl Answer {
     }
 
     /// serde のエラーを位置だけに落とす。メッセージは値を引用するので捨てる。
-    pub(crate) fn shape_error(&self, e: &serde_json::Error) -> Error {
+    fn shape_error(&self, e: &serde_json::Error) -> Error {
         self.protocol(ProtocolErrorKind::Shape {
             line: e.line(),
             column: e.column(),

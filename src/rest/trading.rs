@@ -651,11 +651,7 @@ impl Client<Authenticated> {
             order_ids: order_ids.as_slice(),
         });
         let answer = self.private(call).await?;
-        let Some(raw) = answer.raw() else {
-            return Err(answer.protocol(ProtocolErrorKind::MissingData));
-        };
-        let wire: WireCancelOrders<'_> =
-            serde_json::from_str(raw).map_err(|e| answer.shape_error(&e))?;
+        let wire: WireCancelOrders<'_> = answer.data()?;
         CancelOrdersOutcome::from_wire(order_ids, wire).map_err(|kind| answer.protocol(kind))
     }
 
@@ -688,10 +684,7 @@ impl Client<Authenticated> {
         filter.check()?;
         let call = Call::new(endpoint!(POST "/v1/cancelBulkOrder")).json(&filter.wire());
         let answer = self.private(call).await?;
-        let Some(raw) = answer.raw() else {
-            return Err(answer.protocol(ProtocolErrorKind::MissingData));
-        };
-        let ids: Vec<OrderId> = serde_json::from_str(raw).map_err(|e| answer.shape_error(&e))?;
+        let ids: Vec<OrderId> = answer.data()?;
         check_bulk_cancel_ids(&ids)
             .map_err(|p| answer.protocol(ProtocolErrorKind::Postcondition(p)))?;
         Ok(ids)
@@ -808,15 +801,9 @@ impl Client<Authenticated> {
     }
 }
 
-/// `Answer` を消費せずに `{"list": [...]}` をデコードする。事後条件のエラーが
-/// 答えの文脈を必要とするため。
+/// `{"list": [...]}` の `list`。
 fn decode_list<T: serde::de::DeserializeOwned>(answer: &Answer) -> Result<Vec<T>> {
-    let Some(raw) = answer.raw() else {
-        return Err(answer.protocol(ProtocolErrorKind::MissingData));
-    };
-    serde_json::from_str::<List<T>>(raw)
-        .map(|l| l.list)
-        .map_err(|e| answer.shape_error(&e))
+    answer.data::<List<T>>().map(|l| l.list)
 }
 
 #[cfg(test)]

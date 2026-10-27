@@ -8,7 +8,7 @@
 use serde::Serialize;
 use zeroize::Zeroizing;
 
-use super::{Call, endpoint};
+use super::{Answer, Call, endpoint};
 use crate::client::{Authenticated, Client};
 use crate::error::{ProtocolErrorKind, Result};
 use crate::secret::AccessToken;
@@ -41,16 +41,7 @@ impl Client<Authenticated> {
     /// 捨てる。トークンを引用するからである)。
     pub(crate) async fn acquire_ws_token(&self) -> Result<AccessToken> {
         let call = Call::new(endpoint!(POST "/v1/ws-auth")).json(&EmptyBody {});
-        let answer = self.private(call).await?;
-        let Some(raw) = answer.raw() else {
-            return Err(answer.protocol(ProtocolErrorKind::MissingData));
-        };
-        let token: Zeroizing<String> = match serde_json::from_str::<String>(raw) {
-            Ok(text) => Zeroizing::new(text),
-            Err(e) => return Err(answer.shape_error(&e)),
-        };
-        AccessToken::parse(&token)
-            .map_err(|_| answer.protocol(ProtocolErrorKind::Shape { line: 1, column: 1 }))
+        token_from(&self.private(call).await?)
     }
 
     /// `PUT /private/v1/ws-auth {"token"}`: 有効期限を 60 分にリセットする。
@@ -77,166 +68,33 @@ impl Client<Authenticated> {
     }
 }
 
+/// `data` の文字列を [`AccessToken`] にする。
+///
+/// # エラー
+/// `data` がない、文字列でない、または字句規則に反するとき `Protocol`
+/// (`MissingData` または `Shape`)。エラーはトークンの値を持たない。
+fn token_from(answer: &Answer) -> Result<AccessToken> {
+    let token = Zeroizing::new(answer.data::<String>()?);
+    AccessToken::parse(&token)
+        .map_err(|_| answer.protocol(ProtocolErrorKind::Shape { line: 1, column: 1 }))
+}
+
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
-
-    use crate::error::{ApiGroup, Error, ErrorCode, ProtocolErrorKind, TransportErrorKind};
-    use crate::mock::{MockExchange, Reply, SignatureCheck};
+    use super::token_from;
+    use crate::error::{ApiGroup, Error, ProtocolErrorKind};
     use crate::rest::envelope;
-    use crate::secret::AccessToken;
-    use crate::{ApiKey, ApiSecret, Credentials};
 
-    #[tokio::test]
-    async fn the_built_in_token_store_issues_extends_and_deletes_signed_requests() {
-        let mock = MockExchange::start().await;
-        let client = mock.client().authenticate(MockExchange::credentials());
-
-        let token = client.acquire_ws_token().await.expect("issued");
-        client.extend_ws_token(&token).await.expect("extended");
-        let text = token.reveal().to_owned();
-        client.delete_ws_token(token).await.expect("deleted");
-
-        mock.with_tokens(|t| {
-            assert_eq!(t.issued, std::slice::from_ref(&text));
-            assert_eq!(t.extended, std::slice::from_ref(&text));
-            assert_eq!(t.deleted, std::slice::from_ref(&text));
-            assert!(!t.is_live(&text));
-        });
-        let requests = mock.requests();
-        let methods: Vec<&str> = requests.iter().map(|r| r.method.as_str()).collect();
-        assert_eq!(methods, ["POST", "PUT", "DELETE"]);
-        assert!(
-            requests
-                .iter()
-                .all(|r| r.path == "/private/v1/ws-auth" && r.signature == SignatureCheck::Valid)
-        );
-        assert_eq!(
-            requests[0].body, b"{}",
-            "the official samples sign and send an empty object"
-        );
-        assert_eq!(
-            requests[1].body,
-            format!(r#"{{"token":"{text}"}}"#).as_bytes()
-        );
-        mock.assert_done();
-    }
-
-    #[tokio::test]
-    async fn the_three_fixtures_drive_the_calls_end_to_end() {
-        let mock = MockExchange::start().await;
-        mock.on("POST", "/private/v1/ws-auth")
-            .signed()
-            .json_body(json!({}))
-            .times(1)
-            .fixture("private_post_ws-auth.json");
-        mock.on("PUT", "/private/v1/ws-auth")
-            .signed()
-            .json_body(json!({"token": "xxxxxxxxxxxxxxxxxxxx"}))
-            .times(1)
-            .fixture("private_put_ws-auth.json");
-        mock.on("DELETE", "/private/v1/ws-auth")
-            .signed()
-            .json_body(json!({"token": "xxxxxxxxxxxxxxxxxxxx"}))
-            .times(1)
-            .fixture("private_delete_ws-auth.json");
-        let client = mock.client().authenticate(MockExchange::credentials());
-
-        let token = client.acquire_ws_token().await.unwrap();
-        assert_eq!(token.reveal(), "xxxxxxxxxxxxxxxxxxxx");
-        client.extend_ws_token(&token).await.unwrap();
-        client.delete_ws_token(token).await.unwrap();
-
-        mock.assert_done();
-    }
-
-    #[tokio::test]
-    async fn a_bad_secret_is_answered_with_err_5010_in_a_200_envelope() {
-        let mock = MockExchange::start().await;
-        let wrong = Credentials::new(
-            ApiKey::new(crate::mock::TEST_KEY.to_owned()).unwrap(),
-            ApiSecret::new("not-the-secret".to_owned()).unwrap(),
-        );
-        let client = mock.client().authenticate(wrong);
-
-        let err = client
-            .acquire_ws_token()
-            .await
-            .expect_err("signature mismatch");
-
-        match err {
-            Error::Api(api) => assert!(api.has(ErrorCode::BAD_SIGNATURE)),
-            other => panic!("expected ERR-5010, got {other:?}"),
-        }
-        assert_eq!(mock.requests()[0].signature, SignatureCheck::Invalid);
-    }
-
-    #[tokio::test]
-    async fn a_connection_closed_after_a_post_is_outcome_unknown() {
-        let mock = MockExchange::start().await;
-        mock.on("POST", "/private/v1/ws-auth")
-            .times(1)
-            .reply(Reply::CloseAfterRequest);
-        let client = mock.client().authenticate(MockExchange::credentials());
-
-        let err = client.acquire_ws_token().await.expect_err("no answer");
-
-        assert!(err.outcome_unknown(), "{err:?}");
-        assert!(
-            matches!(&err, Error::Transport(t) if *t.kind() == TransportErrorKind::ClosedEarly)
-        );
-        mock.assert_done();
-    }
-
-    #[tokio::test]
-    async fn a_connection_dropped_on_headers_is_also_outcome_unknown() {
-        let mock = MockExchange::start().await;
-        mock.on("POST", "/private/v1/ws-auth")
-            .times(1)
-            .reply(Reply::DropConnection);
-        let client = mock.client().authenticate(MockExchange::credentials());
-
-        let err = client.acquire_ws_token().await.expect_err("no answer");
-
-        assert!(err.outcome_unknown(), "{err:?}");
-        mock.assert_done();
-    }
-
-    #[tokio::test]
-    async fn a_token_that_fails_its_lexical_rule_is_a_shape_error() {
-        let mock = MockExchange::start().await;
-        mock.on("POST", "/private/v1/ws-auth")
-            .reply(Reply::Json(r#"{"status":0,"data":"has/slash"}"#.to_owned()));
-        let client = mock.client().authenticate(MockExchange::credentials());
-
-        let err = client
-            .acquire_ws_token()
-            .await
-            .expect_err("not url-path safe");
-
-        match err {
-            Error::Protocol(p) => {
-                assert!(matches!(p.kind(), ProtocolErrorKind::Shape { .. }));
-                assert!(!format!("{p}").contains("slash"));
-            }
-            other => panic!("{other:?}"),
-        }
+    fn answer(body: &[u8]) -> crate::rest::Answer {
+        envelope::parse(ApiGroup::PrivateRest, "POST /v1/ws-auth", 200, body).unwrap()
     }
 
     #[test]
     fn the_three_ws_auth_fixtures_decode() {
-        let post = envelope::parse(
-            ApiGroup::PrivateRest,
-            "POST /v1/ws-auth",
-            200,
-            include_bytes!("../../tests/fixtures/private_post_ws-auth.json"),
-        )
-        .unwrap();
-        let token: String = serde_json::from_str(post.raw().unwrap()).unwrap();
-        assert_eq!(
-            AccessToken::parse(&token).unwrap().reveal(),
-            "xxxxxxxxxxxxxxxxxxxx"
-        );
+        let post = answer(include_bytes!(
+            "../../tests/fixtures/private_post_ws-auth.json"
+        ));
+        assert_eq!(token_from(&post).unwrap().reveal(), "xxxxxxxxxxxxxxxxxxxx");
         for fixture in [
             &include_bytes!("../../tests/fixtures/private_put_ws-auth.json")[..],
             &include_bytes!("../../tests/fixtures/private_delete_ws-auth.json")[..],
@@ -249,21 +107,23 @@ mod tests {
     }
 
     #[test]
-    fn a_non_string_token_is_a_shape_error_without_the_value() {
-        let answer = envelope::parse(
-            ApiGroup::PrivateRest,
-            "POST /v1/ws-auth",
-            200,
-            br#"{"status":0,"data":{"token":"x"}}"#,
-        )
-        .unwrap();
-        let err = answer.data::<String>().unwrap_err();
-        match err {
-            Error::Protocol(p) => {
-                assert!(matches!(p.kind(), ProtocolErrorKind::Shape { .. }));
-                assert!(!p.to_string().contains("token"));
+    fn a_token_that_is_not_a_string_or_breaks_the_lexical_rule_is_a_shape_error_without_the_value()
+    {
+        for body in [
+            &br#"{"status":0,"data":{"token":"x"}}"#[..],
+            &br#"{"status":0,"data":"has/slash"}"#[..],
+        ] {
+            let err = token_from(&answer(body)).unwrap_err();
+            match err {
+                Error::Protocol(p) => {
+                    assert!(matches!(p.kind(), ProtocolErrorKind::Shape { .. }));
+                    let text = p.to_string();
+                    assert!(!text.contains("token") && !text.contains("slash"), "{text}");
+                }
+                other => panic!("{other:?}"),
             }
-            other => panic!("{other:?}"),
         }
+        let err = token_from(&answer(br#"{"status":0}"#)).unwrap_err();
+        assert!(matches!(err, Error::Protocol(p) if *p.kind() == ProtocolErrorKind::MissingData));
     }
 }

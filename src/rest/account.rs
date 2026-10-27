@@ -20,7 +20,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::{Answer, Call, endpoint};
+use super::{Call, endpoint};
 use crate::client::{Authenticated, Client};
 use crate::domain::{
     Amount, BusinessDate, BusinessDateRange, CryptoShortfallStatus, Decimal, FeeType,
@@ -541,7 +541,7 @@ impl Client<Authenticated> {
             transfer_type: direction,
         });
         let answer = self.private(call).await?;
-        let mut entries = decode::<Vec<Entry>>(&answer)?;
+        let mut entries: Vec<Entry> = answer.data()?;
         match (entries.pop(), entries.is_empty()) {
             (Some(entry), true) => Ok(entry.transferred_amount),
             (last, _) => Err(answer.protocol(ProtocolErrorKind::Postcondition(
@@ -551,13 +551,4 @@ impl Client<Authenticated> {
             ))),
         }
     }
-}
-
-/// `Answer::data` と同じ規則で、答えを消費せずにデコードする。事後条件の
-/// エラーが答えの文脈 (操作名) を必要とするため。
-fn decode<T: serde::de::DeserializeOwned>(answer: &Answer) -> Result<T> {
-    let Some(raw) = answer.raw() else {
-        return Err(answer.protocol(ProtocolErrorKind::MissingData));
-    };
-    serde_json::from_str(raw).map_err(|e| answer.shape_error(&e))
 }
