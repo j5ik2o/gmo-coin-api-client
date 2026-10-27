@@ -72,12 +72,19 @@ impl Error {
         }
     }
 
-    /// 取引所は `status == 0` で受け付けたが、答え (`data`) を読めなかった。
-    /// リクエストは適用されている。注文なら発注済みで、`OrderId` だけが
-    /// 失われたので、`orders(OrderLookup::ByClientOrderIds)` で引く。再送は
-    /// 不要で、しても ERR-915 が返るだけである。`outcome_unknown` も真になる。
+    /// GET 以外の REST 呼び出しで、取引所は `status == 0` で受け付けたが、
+    /// 答え (`data`) を読めなかった。リクエストは適用されている。注文なら
+    /// 発注済みで、`OrderId` だけが失われたので、
+    /// `orders(OrderLookup::ByClientOrderIds)` で引く。再送は不要で、しても
+    /// ERR-915 が返るだけである。`outcome_unknown` も真になる。
+    ///
+    /// GET の後の同じ種類のエラー (たとえば `ticker()` の `WrongSymbol`) では
+    /// 偽。読み取りは何も適用しないので、問い自体が成り立たない。
     pub fn accepted_but_unreadable(&self) -> bool {
-        matches!(self, Error::Protocol(p) if p.kind.after_acceptance())
+        matches!(
+            self,
+            Error::Protocol(p) if p.after_state_change() && p.kind.after_acceptance()
+        )
     }
 }
 
@@ -631,6 +638,15 @@ mod tests {
             ProtocolErrorKind::HttpStatus(502),
         );
         assert!(!get_gateway.outcome_unknown());
+        let get_unreadable = protocol(
+            ApiGroup::PublicRest,
+            "GET /v1/ticker",
+            ProtocolErrorKind::Postcondition(Postcondition::WrongSymbol),
+        );
+        assert!(
+            !get_unreadable.outcome_unknown() && !get_unreadable.accepted_but_unreadable(),
+            "a read changes nothing, so neither predicate applies"
+        );
         let ws = protocol(
             ApiGroup::PrivateWs,
             "/v1",
