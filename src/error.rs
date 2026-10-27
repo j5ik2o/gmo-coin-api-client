@@ -19,7 +19,7 @@
 use core::fmt;
 use std::io;
 
-use crate::domain::{InvalidValue, OrderId, Timestamp};
+use crate::domain::{ExecutionId, InvalidValue, OrderId, Timestamp};
 
 pub type Result<T, E = Error> = core::result::Result<T, E>;
 
@@ -364,6 +364,12 @@ pub enum Postcondition {
     WrongSymbol,
     /// `orders(..)` が、検索で指定していない注文を返した。
     OrderNotRequested(OrderId),
+    /// `executions(..)` が、検索で指定していない約定を返した。
+    ExecutionNotRequested(ExecutionId),
+    /// `cancel_bulk_orders` が、1 回の上限 (10 件) を超える id を返した。
+    BulkCancelTooManyIds { actual: usize },
+    /// `cancel_bulk_orders` が同じ id を二度返した。
+    BulkCancelIdRepeated(OrderId),
     /// 1 件のはずの `data` 配列 (`account/transfer`) が別の長さだった。
     ExpectedOneEntry { actual: usize },
 }
@@ -380,6 +386,15 @@ impl fmt::Display for Postcondition {
             Postcondition::WrongSymbol => f.write_str("要求した銘柄と応答の銘柄が一致しません"),
             Postcondition::OrderNotRequested(id) => {
                 write!(f, "要求していない注文 {id} が返されました")
+            }
+            Postcondition::ExecutionNotRequested(id) => {
+                write!(f, "要求していない約定 {id} が返されました")
+            }
+            Postcondition::BulkCancelTooManyIds { actual } => {
+                write!(f, "一括取消の結果が上限 10 件を超えて {actual} 件でした")
+            }
+            Postcondition::BulkCancelIdRepeated(id) => {
+                write!(f, "一括取消の結果に注文 id {id} が二度現れました")
             }
             Postcondition::ExpectedOneEntry { actual } => {
                 write!(f, "エントリは 1 件のはずが {actual} 件でした")

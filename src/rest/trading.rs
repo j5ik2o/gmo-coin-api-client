@@ -157,6 +157,26 @@ impl CancelOrdersOutcome {
     }
 }
 
+/// `cancelBulkOrder` が返した id の事後条件を検査する純粋関数。
+///
+/// # 事後条件
+/// `Ok` なら、id は 10 件以下で、どれも二度現れない。
+///
+/// # エラー
+/// - `BulkCancelTooManyIds`: 11 件以上ある。
+/// - `BulkCancelIdRepeated`: 同じ id が二度ある。
+fn check_bulk_cancel_ids(ids: &[OrderId]) -> core::result::Result<(), Postcondition> {
+    if ids.len() > 10 {
+        return Err(Postcondition::BulkCancelTooManyIds { actual: ids.len() });
+    }
+    for (i, id) in ids.iter().enumerate() {
+        if ids[..i].contains(id) {
+            return Err(Postcondition::BulkCancelIdRepeated(*id));
+        }
+    }
+    Ok(())
+}
+
 /// `cancelOrders` の事後条件を、送った id に照らして検査する純粋関数。
 ///
 /// # 事前条件
@@ -314,8 +334,10 @@ impl Client<Authenticated> {
     /// 1 件から 10 件。
     ///
     /// # 事後条件
-    /// 送られたままの約定。応答の約定が検索条件に一致するかは検査しない
-    /// (`Postcondition` に該当する variant がない)。
+    /// 返された約定はどれも検索条件に一致する。注文 id の検索なら `orderId`、
+    /// クライアント注文 id の検索なら `clientOrderId` (応答に無ければ不一致)、
+    /// 約定 id の検索なら `executionId` が要求のどれかと等しい。そうでなければ
+    /// `Protocol(Postcondition(ExecutionNotRequested))`。
     ///
     /// # エラー
     /// [REST 共通の集合](crate::rest#エラー)。
@@ -332,7 +354,19 @@ impl Client<Authenticated> {
     pub async fn executions(&self, lookup: &ExecutionLookup) -> Result<Vec<Execution>> {
         let (key, value) = lookup.query();
         let call = Call::new(endpoint!(GET "/v1/executions")).query(key, value);
-        decode_list(&self.private(call).await?)
+        let answer = self.private(call).await?;
+        let executions: Vec<Execution> = decode_list(&answer)?;
+        let requested = |e: &Execution| match lookup {
+            ExecutionLookup::ByOrderId(id) => e.order_id == *id,
+            ExecutionLookup::ByExecutionIds(ids) => ids.contains(&e.execution_id),
+            ExecutionLookup::ByClientOrderId(id) => e.client_order_id.as_ref() == Some(id),
+        };
+        match executions.iter().find(|e| !requested(e)) {
+            Some(stray) => Err(answer.protocol(ProtocolErrorKind::Postcondition(
+                Postcondition::ExecutionNotRequested(stray.execution_id),
+            ))),
+            None => Ok(executions),
+        }
     }
 
     /// `GET /private/v1/latestExecutions?symbol=&page=&count=`: 直近 1 日。
@@ -597,8 +631,9 @@ impl Client<Authenticated> {
     /// `filter.symbols` は空でない (そうでなければ `Contract(InvalidValue)`)。
     ///
     /// # 事後条件
-    /// 送られたままの id。ドキュメントは最大 10 件とするが、それは検査しない
-    /// (`Postcondition` に該当する variant がない)。
+    /// 取引所は 1 回に最大 10 件を取り消すので、返る id は 10 件以下で重複しない。
+    /// 11 件以上なら `Protocol(Postcondition(BulkCancelTooManyIds))`、同じ id が
+    /// 二度あれば `Protocol(Postcondition(BulkCancelIdRepeated))`。
     ///
     /// # エラー
     /// `Contract`: `symbols` が空。リクエストは作られない。ほかは
@@ -617,7 +652,14 @@ impl Client<Authenticated> {
     pub async fn cancel_bulk_orders(&self, filter: &BulkCancel) -> Result<Vec<OrderId>> {
         filter.check()?;
         let call = Call::new(endpoint!(POST "/v1/cancelBulkOrder")).json(&filter.wire());
-        self.private(call).await?.data()
+        let answer = self.private(call).await?;
+        let Some(raw) = answer.raw() else {
+            return Err(answer.protocol(ProtocolErrorKind::MissingData));
+        };
+        let ids: Vec<OrderId> = serde_json::from_str(raw).map_err(|e| answer.shape_error(&e))?;
+        check_bulk_cancel_ids(&ids)
+            .map_err(|p| answer.protocol(ProtocolErrorKind::Postcondition(p)))?;
+        Ok(ids)
     }
 
     /// `POST /private/v1/closeOrder`。

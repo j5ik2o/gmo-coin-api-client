@@ -195,6 +195,34 @@ async fn an_empty_active_orders_answer_is_ok_with_no_items() {
     assert!(page.pagination().is_none());
 }
 
+fn execution_json(
+    execution_id: u64,
+    order_id: u64,
+    client_order_id: Option<&str>,
+) -> serde_json::Value {
+    let mut execution = json!({
+        "executionId": execution_id,
+        "orderId": order_id,
+        "positionId": 1234567,
+        "symbol": "BTC",
+        "side": "BUY",
+        "settleType": "OPEN",
+        "size": "0.02",
+        "price": "1900000",
+        "lossGain": "0",
+        "fee": "223",
+        "timestamp": "2020-11-24T21:27:04.764Z"
+    });
+    if let Some(client_order_id) = client_order_id {
+        execution["clientOrderId"] = json!(client_order_id);
+    }
+    execution
+}
+
+fn executions_reply(list: Vec<serde_json::Value>) -> Reply {
+    Reply::Json(json!({"status": 0, "data": {"list": list}}).to_string())
+}
+
 #[tokio::test]
 async fn executions_use_one_query_key_per_lookup_kind() {
     let mock = MockExchange::start().await;
@@ -207,7 +235,10 @@ async fn executions_use_one_query_key_per_lookup_kind() {
             .signed()
             .query(query)
             .times(1)
-            .fixture("private_get_executions.json");
+            .reply(executions_reply(vec![
+                execution_json(92123912, 223456789, Some("abc123")),
+                execution_json(72123911, 223456789, Some("abc123")),
+            ]));
     }
     let client = authed(&mock);
     let ids = Batch::new(vec![
@@ -236,8 +267,35 @@ async fn executions_use_one_query_key_per_lookup_kind() {
     );
     assert_eq!(by_order[0].settle_type, SettleType::Open);
     assert_eq!(by_order[0].fee.to_string(), "223");
-    assert_eq!(by_order[1].client_order_id, None);
     mock.assert_done();
+}
+
+#[tokio::test]
+async fn an_execution_that_does_not_match_the_lookup_fails_the_postcondition() {
+    let stray_id = ExecutionId::new(72123911).unwrap();
+    let lookups = [
+        ExecutionLookup::ByOrderId(oid(223456789)),
+        ExecutionLookup::ByClientOrderId(cid("abc123")),
+        ExecutionLookup::ByExecutionIds(Batch::one(ExecutionId::new(92123912).unwrap())),
+    ];
+    for lookup in lookups {
+        let mock = MockExchange::start().await;
+        mock.on("GET", "/private/v1/executions")
+            .fixture("private_get_executions.json");
+
+        let err = authed(&mock).executions(&lookup).await.expect_err(
+            "the fixture holds an execution of another order, without a client order id",
+        );
+
+        match err {
+            Error::Protocol(p) => assert_eq!(
+                p.kind(),
+                &ProtocolErrorKind::Postcondition(Postcondition::ExecutionNotRequested(stray_id)),
+                "{lookup:?}"
+            ),
+            other => panic!("{other:?}"),
+        }
+    }
 }
 
 #[tokio::test]
@@ -649,6 +707,59 @@ async fn cancel_bulk_orders_sends_the_filter_and_returns_the_ids() {
     assert_eq!(narrowed, [oid(637000), oid(637002)]);
     assert_eq!(plain, narrowed);
     mock.assert_done();
+}
+
+fn bulk_cancel_filter() -> BulkCancel {
+    BulkCancel {
+        symbols: vec![Symbol::BTC],
+        side: None,
+        settle_type: None,
+        newest_first: false,
+    }
+}
+
+async fn bulk_cancel_answering(ids: Vec<u64>) -> Result<Vec<OrderId>, Error> {
+    let mock = MockExchange::start().await;
+    mock.on("POST", "/private/v1/cancelBulkOrder")
+        .reply(Reply::Json(json!({"status": 0, "data": ids}).to_string()));
+    authed(&mock)
+        .cancel_bulk_orders(&bulk_cancel_filter())
+        .await
+}
+
+#[tokio::test]
+async fn cancel_bulk_orders_accepts_exactly_ten_ids() {
+    let ids = bulk_cancel_answering((1..=10).collect())
+        .await
+        .expect("ten ids");
+
+    assert_eq!(ids, (1..=10).map(oid).collect::<Vec<_>>());
+}
+
+#[tokio::test]
+async fn cancel_bulk_orders_rejects_more_than_ten_ids() {
+    let err = bulk_cancel_answering((1..=11).collect())
+        .await
+        .expect_err("eleven ids");
+
+    assert!(matches!(
+        err,
+        Error::Protocol(p) if p.kind()
+            == &ProtocolErrorKind::Postcondition(Postcondition::BulkCancelTooManyIds { actual: 11 })
+    ));
+}
+
+#[tokio::test]
+async fn cancel_bulk_orders_rejects_a_repeated_id() {
+    let err = bulk_cancel_answering(vec![5, 6, 5])
+        .await
+        .expect_err("id 5 twice");
+
+    assert!(matches!(
+        err,
+        Error::Protocol(p) if p.kind()
+            == &ProtocolErrorKind::Postcondition(Postcondition::BulkCancelIdRepeated(oid(5)))
+    ));
 }
 
 #[tokio::test]
