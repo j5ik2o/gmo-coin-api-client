@@ -1,0 +1,15 @@
+{
+  "status": 0,
+  "data": {
+    "actualProfitLoss": "68286188",
+    "availableAmount": "57262506",
+    "availableAmountForSpot": "57262506",
+    "cryptoShortfallStatus": "NORMAL",
+    "margin": "1021682",
+    "marginCallStatus": "NORMAL",
+    "marginRatio": "6683.6",
+    "profitLoss": "0",
+    "transferableAmount": "57262506"
+  },
+  "responsetime": "2019-03-19T02:15:06.051Z"
+}

@@ -1,0 +1,29 @@
+{
+  "status": 0,
+  "data": {
+    "pagination": {
+      "currentPage": 1,
+      "count": 30
+    },
+    "list": [
+      {
+        "rootOrderId": 123456789,
+        "orderId": 123456789,
+        "clientOrderId": "abc123",
+        "symbol": "BTC",
+        "side": "BUY",
+        "orderType": "NORMAL",
+        "executionType": "LIMIT",
+        "settleType": "OPEN",
+        "size": "1",
+        "executedSize": "0",
+        "price": "840000",
+        "losscutPrice": "0",
+        "status": "ORDERED",
+        "timeInForce": "FAS",
+        "timestamp": "2019-03-19T01:07:24.217Z"
+      }
+    ]
+  },
+  "responsetime": "2019-03-19T01:07:24.217Z"
+}

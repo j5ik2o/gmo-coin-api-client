@@ -1,0 +1,18 @@
+{
+  "channel": "orderEvents",
+  "orderId": 123456789,
+  "clientOrderId": "abc123",
+  "symbol": "BTC_JPY",
+  "settleType": "OPEN",
+  "executionType": "LIMIT",
+  "side": "BUY",
+  "orderStatus": "CANCELED",
+  "cancelType": "USER",
+  "orderTimestamp": "2019-03-19T02:15:06.081Z",
+  "orderPrice": "876045",
+  "orderSize": "0.8",
+  "orderExecutedSize": "0",
+  "losscutPrice": "0",
+  "timeInForce": "FAS",
+  "msgType": "NOR"
+}

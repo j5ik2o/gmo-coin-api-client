@@ -1,0 +1,16 @@
+{
+  "status": 0,
+  "data": {
+    "list": [
+      {
+        "averagePositionRate": "715656",
+        "positionLossGain": "250675",
+        "side": "BUY",
+        "sumOrderQuantity": "2",
+        "sumPositionQuantity": "11.6999",
+        "symbol": "BTC_JPY"
+      }
+    ]
+  },
+  "responsetime": "2019-03-19T02:15:06.102Z"
+}

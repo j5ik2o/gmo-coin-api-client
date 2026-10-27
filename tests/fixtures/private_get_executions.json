@@ -1,0 +1,35 @@
+{
+  "status": 0,
+  "data": {
+    "list": [
+      {
+        "executionId": 92123912,
+        "orderId": 223456789,
+        "clientOrderId": "abc123",
+        "positionId": 1234567,
+        "symbol": "BTC_JPY",
+        "side": "BUY",
+        "settleType": "OPEN",
+        "size": "0.02",
+        "price": "1900000",
+        "lossGain": "0",
+        "fee": "223",
+        "timestamp": "2020-11-24T21:27:04.764Z"
+      },
+      {
+        "executionId": 72123911,
+        "orderId": 123456789,
+        "positionId": 1234567,
+        "symbol": "BTC",
+        "side": "BUY",
+        "settleType": "OPEN",
+        "size": "0.7361",
+        "price": "877404",
+        "lossGain": "0",
+        "fee": "323",
+        "timestamp": "2019-03-19T02:15:06.081Z"
+      }
+    ]
+  },
+  "responsetime": "2019-03-19T02:15:06.081Z"
+}

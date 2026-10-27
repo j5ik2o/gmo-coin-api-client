@@ -1,0 +1,42 @@
+{
+  "status": 0,
+  "data": {
+    "list": [
+      {
+        "orderId": 223456789,
+        "clientOrderId": "abc123",
+        "rootOrderId": 223456789,
+        "symbol": "BTC_JPY",
+        "side": "BUY",
+        "orderType": "NORMAL",
+        "executionType": "LIMIT",
+        "settleType": "OPEN",
+        "size": "0.02",
+        "executedSize": "0.02",
+        "price": "1430001",
+        "losscutPrice": "0",
+        "status": "EXECUTED",
+        "timeInForce": "FAS",
+        "timestamp": "2020-10-14T20:18:59.343Z"
+      },
+      {
+        "rootOrderId": 123456789,
+        "orderId": 123456789,
+        "symbol": "BTC",
+        "side": "BUY",
+        "orderType": "NORMAL",
+        "executionType": "LIMIT",
+        "settleType": "OPEN",
+        "size": "1",
+        "executedSize": "0",
+        "price": "900000",
+        "losscutPrice": "0",
+        "status": "CANCELED",
+        "cancelType": "USER",
+        "timeInForce": "FAS",
+        "timestamp": "2019-03-19T02:15:06.059Z"
+      }
+    ]
+  },
+  "responsetime": "2019-03-19T02:15:06.059Z"
+}

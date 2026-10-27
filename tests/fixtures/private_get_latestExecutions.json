@@ -1,0 +1,26 @@
+{
+  "status": 0,
+  "data": {
+    "pagination": {
+      "currentPage": 1,
+      "count": 30
+    },
+    "list": [
+      {
+        "executionId": 72123911,
+        "orderId": 123456789,
+        "clientOrderId": "abc123",
+        "positionId": 1234567,
+        "symbol": "BTC",
+        "side": "BUY",
+        "settleType": "OPEN",
+        "size": "0.7361",
+        "price": "877404",
+        "lossGain": "0",
+        "fee": "323",
+        "timestamp": "2019-03-19T02:15:06.086Z"
+      }
+    ]
+  },
+  "responsetime": "2019-03-19T02:15:06.086Z"
+}

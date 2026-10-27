@@ -1,0 +1,22 @@
+{
+  "channel": "executionEvents",
+  "orderId": 123456789,
+  "clientOrderId": "abc123",
+  "executionId": 72123911,
+  "symbol": "BTC_JPY",
+  "settleType": "OPEN",
+  "executionType": "LIMIT",
+  "side": "BUY",
+  "executionPrice": "877404",
+  "executionSize": "0.5",
+  "positionId": 123456789,
+  "orderTimestamp": "2019-03-19T02:15:06.081Z",
+  "executionTimestamp": "2019-03-19T02:15:06.081Z",
+  "lossGain": "0",
+  "fee": "323",
+  "orderPrice": "877200",
+  "orderSize": "0.8",
+  "orderExecutedSize": "0.7",
+  "timeInForce": "FAS",
+  "msgType": "ER"
+}

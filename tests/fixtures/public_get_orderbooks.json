@@ -1,0 +1,19 @@
+{
+  "status": 0,
+  "data": {
+    "asks": [
+      {
+        "price": "455659",
+        "size": "0.1"
+      }
+    ],
+    "bids": [
+      {
+        "price": "455659",
+        "size": "0.1"
+      }
+    ],
+    "symbol": "BTC"
+  },
+  "responsetime": "2019-03-19T02:15:06.026Z"
+}

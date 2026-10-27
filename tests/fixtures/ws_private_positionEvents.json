@@ -1,0 +1,14 @@
+{
+  "channel": "positionEvents",
+  "positionId": 1234567,
+  "symbol": "BTC_JPY",
+  "side": "BUY",
+  "size": "0.22",
+  "orderdSize": "0",
+  "price": "876045",
+  "lossGain": "14",
+  "leverage": "4",
+  "losscutPrice": "766540",
+  "timestamp": "2019-03-19T02:15:06.094Z",
+  "msgType": "OPR"
+}

@@ -1,0 +1,13 @@
+{
+  "status": 0,
+  "data": [
+    {
+      "amount": "50000",
+      "fee": "0",
+      "status": "EXECUTED",
+      "symbol": "JPY",
+      "timestamp": "2021-01-01T13:47:12.791Z"
+    }
+  ],
+  "responsetime": "2024-02-28T11:48:57.996Z"
+}

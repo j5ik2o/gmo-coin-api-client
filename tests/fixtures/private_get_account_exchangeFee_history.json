@@ -1,0 +1,26 @@
+{
+  "status": 0,
+  "data": {
+    "pagination": {
+      "cursor": "AbzejT4z9R01mjvOj_APz3Y34AQmWAQenEVr07RfrVCbAmJZi9vgFexNTqKFYU9uW7rArTHokipb0gXMElEvu2v90QAey3haCOB9"
+    },
+    "list": [
+      {
+        "symbol": "BTC_JPY",
+        "feeType": "LEVERAGE_FEE",
+        "deliveryDate": "20260615",
+        "deliveryDatetime": "2026-06-15T21:01:23.456Z",
+        "deliveryAmount": "-120"
+      },
+      {
+        "symbol": "BTC",
+        "feeType": "SPOT_FEE_REFUND",
+        "deliveryDate": "20260615",
+        "deliveryDatetime": "2026-06-15T21:01:21.229Z",
+        "deliveryAmount": "4"
+      }
+    ],
+    "lastFinalizedDate": "20260615"
+  },
+  "responsetime": "2026-07-03T11:48:57.996Z"
+}
