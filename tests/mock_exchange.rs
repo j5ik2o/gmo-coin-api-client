@@ -1,6 +1,5 @@
 //! モック取引所そのものの振る舞い。WebSocket 側は tokio-tungstenite を
-//! クライアントとして直接使って確かめる。フェーズ 3 (WebSocket フィード) は
-//! このモックを編集せずに使う前提なので、ここでその契約を固定する。
+//! クライアントとして直接使って確かめる。
 
 mod support;
 
@@ -57,7 +56,6 @@ async fn public_feed_records_commands_pushes_text_and_answers_pings() {
         let state = mock.ws();
         async move { state.ping(Api::Public, WAIT).await }
     });
-    // tungstenite answers the ping while the client reads.
     let ping = client.next().await.unwrap().unwrap();
     assert!(matches!(ping, Message::Ping(_)), "{ping:?}");
     client.flush().await.unwrap();
@@ -228,6 +226,47 @@ async fn assert_done_reports_unmatched_requests_and_missed_expectations() {
     assert!(
         message.contains("unmatched request: GET /public/v1/symbols"),
         "{message}"
+    );
+}
+
+#[tokio::test]
+async fn a_dropped_connection_still_records_the_real_signature_result() {
+    let mock = MockExchange::start().await;
+    mock.on("POST", "/private/v1/order")
+        .times(2)
+        .reply(support::Reply::DropConnection);
+    let order = gmo_coin_api_client::rest::NewOrder {
+        client_order_id: gmo_coin_api_client::ClientOrderId::parse("abc123").unwrap(),
+        symbol: gmo_coin_api_client::Symbol::BTC,
+        side: gmo_coin_api_client::Side::Buy,
+        size: gmo_coin_api_client::OrderSize::parse("0.02").unwrap(),
+        execution: gmo_coin_api_client::rest::OrderExecution::Market,
+    };
+    let wrong = gmo_coin_api_client::Credentials::new(
+        gmo_coin_api_client::ApiKey::new(TEST_KEY.to_owned()).unwrap(),
+        gmo_coin_api_client::ApiSecret::new("not-the-secret".to_owned()).unwrap(),
+    );
+
+    mock.client()
+        .authenticate(wrong)
+        .place_order(&order)
+        .await
+        .expect_err("dropped");
+    mock.client()
+        .authenticate(MockExchange::credentials())
+        .place_order(&order)
+        .await
+        .expect_err("dropped");
+
+    let signatures: Vec<SignatureCheck> = mock.requests().iter().map(|r| r.signature).collect();
+    assert_eq!(
+        signatures,
+        [SignatureCheck::Invalid, SignatureCheck::Valid],
+        "the drop happens after verification, not instead of it"
+    );
+    assert!(
+        mock.requests().iter().all(|r| !r.body.is_empty()),
+        "the body is read so the signature can be checked"
     );
 }
 

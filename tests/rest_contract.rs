@@ -256,6 +256,20 @@ async fn rate_limit_is_a_typed_error() {
 }
 
 #[tokio::test]
+async fn a_five_digit_code_above_u16_is_still_an_api_error() {
+    let mock = MockExchange::start().await;
+    mock.on("GET", "/public/v1/status")
+        .reply(Reply::Json(api_error("ERR-70000", "Future error.")));
+
+    let err = mock.client().status().await.expect_err("ERR-70000");
+
+    match err {
+        Error::Api(api) => assert_eq!(api.messages()[0].code.0, 70000),
+        other => panic!("expected an API error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn an_error_without_responsetime_still_decodes() {
     let mock = MockExchange::start().await;
     mock.on("GET", "/public/v1/klines")
@@ -347,10 +361,15 @@ async fn a_non_envelope_404_is_a_protocol_error_with_the_status() {
 
     let err = mock.client().status().await.expect_err("404");
 
-    match err {
+    match &err {
         Error::Protocol(p) => assert_eq!(p.kind(), &ProtocolErrorKind::HttpStatus(404)),
         other => panic!("{other:?}"),
     }
+    assert!(
+        !err.outcome_unknown(),
+        "a GET changes nothing, so there is no outcome to doubt"
+    );
+    assert!(!err.accepted_but_unreadable());
 }
 
 #[tokio::test]
@@ -422,4 +441,25 @@ fn plain_http_is_only_for_loopback() {
         let err = RestBase::parse(url).expect_err(url);
         assert_eq!(err.primitive, Primitive::BaseUrl, "{url}");
     }
+}
+
+/// マルチスレッドのランタイムでは、応答を読み終えた直後に hyper の接続
+/// タスクがまだ動いておらず、接続が「準備できていない」ことがある。それでも
+/// 閉じていない接続はプールに戻り、次の呼び出しが準備を待って再利用する。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sequential_calls_on_a_multi_thread_runtime_reuse_one_connection() {
+    let mock = MockExchange::start().await;
+    mock.on("GET", "/public/v1/status")
+        .times(50)
+        .fixture("public_get_status.json");
+    let client = mock.client();
+    for _ in 0..50 {
+        client.status().await.unwrap();
+    }
+    assert_eq!(
+        mock.http_connections(),
+        1,
+        "fifty sequential calls share one pooled connection"
+    );
+    mock.assert_done();
 }

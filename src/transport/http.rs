@@ -46,13 +46,6 @@ impl Method {
             Method::Delete => http::Method::DELETE,
         }
     }
-
-    /// プールされた古い接続が失敗したあと、再送しても安全か。GET だけ。
-    /// PUT と DELETE は HTTP 上は冪等だが、お金を扱う API で推測を外した
-    /// ときの代償は、節約できる往復 1 回に見合わない。
-    pub(crate) const fn retry_on_stale_connection(self) -> bool {
-        matches!(self, Method::Get)
-    }
 }
 
 /// 送信準備のできたリクエスト。
@@ -71,7 +64,7 @@ type Sender = SendRequest<Full<Bytes>>;
 /// 1 つの REST ベースのアイドル接続。
 ///
 /// 共有ではなく所有である。リクエストは接続を取り出し、やり取りの間ずっと
-/// 排他的に所有し、応答を完全に読み終えて接続がまだ使えるときだけ戻す。
+/// 排他的に所有し、応答を完全に読み終えて接続が閉じていないときだけ戻す。
 /// 2 つのリクエストが同時に 1 本の接続を使うことはない。`Mutex` が守るのは
 /// アイドルスタックの push と pop だけで、`.await` をまたいで保持されない
 /// `std` のミューテックスである。
@@ -121,7 +114,6 @@ impl Pool {
 pub(crate) struct Route<'a> {
     pub(crate) api: ApiGroup,
     pub(crate) operation: &'static str,
-    pub(crate) method: Method,
     pub(crate) base: &'a Base,
     pub(crate) pool: &'a Pool,
 }
@@ -141,10 +133,11 @@ enum Attempt {
 /// # 事後条件
 /// - `Delivery::NotSent` の `Err` は、リクエストのバイトが 1 つも書かれて
 ///   いないときだけ。hyper がリクエストを書き始めた後の失敗はすべて `MaybeSent`。
-/// - 再利用した接続で、リクエストが書かれる前に失敗した GET は、新しい接続で
-///   一度だけ再試行される。`encode` が再び呼ばれるので、タイムスタンプと署名は
-///   新しくなる。他のメソッドはここでは決して再試行しない。それは
-///   `Error::outcome_unknown` の役目である。
+/// - 再利用した接続で、リクエストが書かれる前に失敗したら、メソッドを問わず
+///   新しい接続で一度だけ再試行する。hyper は 1 バイトも書いていないときに
+///   限ってリクエストを返すので、取引所に二度届くことはない。`encode` が
+///   再び呼ばれるので、タイムスタンプと署名は新しくなる。書き始めた後の
+///   失敗はここでは再試行しない。それは `Error::outcome_unknown` の役目である。
 pub(crate) async fn round_trip(
     connector: &Connector,
     route: &Route<'_>,
@@ -160,7 +153,6 @@ pub(crate) async fn round_trip(
     let max_body = config.limits.max_response_bytes.get();
     let mut retried = false;
     loop {
-        // 再試行は必ず新しい接続で行う。古い接続をもう一度引くと同じ失敗を繰り返すだけである。
         let pooled = if retried { None } else { route.pool.checkout() };
         let (mut sender, reused) = match pooled {
             Some(sender) => (sender, true),
@@ -188,14 +180,15 @@ pub(crate) async fn round_trip(
         .await;
         match outcome {
             Ok(Ok(response)) => {
-                if sender.is_ready() && !sender.is_closed() {
+                // `is_ready()` は hyper の接続タスクが次に動くまで偽のことが
+                // あり、再利用できる接続を捨ててしまう。準備は次の取り出しが
+                // `ready().await` で待つ。
+                if !sender.is_closed() {
                     route.pool.checkin(sender);
                 }
                 return Ok(response);
             }
-            Ok(Err(Attempt::NotWritten))
-                if reused && route.method.retry_on_stale_connection() && !retried =>
-            {
+            Ok(Err(Attempt::NotWritten)) if reused && !retried => {
                 retried = true;
             }
             Ok(Err(Attempt::NotWritten)) => {
@@ -239,7 +232,10 @@ async fn exchange(
     }
     let status = response.status().as_u16();
     let mut body = response.into_body();
-    let mut buf = Zeroizing::new(Vec::new());
+    // `Content-Length` の分を先に確保する。伸長のたびに古いバッファが
+    // ゼロ埋めされないまま残るのを避けるため (chunked では残る)。
+    let reserve = declared.map_or(0, |n| usize::try_from(n).unwrap_or(usize::MAX));
+    let mut buf = Zeroizing::new(Vec::with_capacity(reserve));
     while let Some(frame) = body.frame().await {
         let frame = frame.map_err(|e| Attempt::Failed(hyper_kind(&e)))?;
         if let Ok(data) = frame.into_data() {

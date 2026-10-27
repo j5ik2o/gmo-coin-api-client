@@ -245,6 +245,29 @@ async fn a_page_size_outside_one_to_one_hundred_never_leaves_the_client() {
 }
 
 #[tokio::test]
+async fn a_cursor_longer_than_256_bytes_never_leaves_the_client() {
+    let mock = MockExchange::start().await;
+    let client = authed(&mock);
+    let range = BusinessDateRange::single(day("20260615"));
+    let too_long = "c".repeat(257);
+
+    let err = client
+        .exchange_fee_history(range, 100, Some(&too_long))
+        .await
+        .expect_err("cursor too long");
+
+    assert!(
+        matches!(
+            &err,
+            Error::Contract(ContractViolation::InvalidValue(v))
+                if v.primitive == gmo_coin_api_client::Primitive::Cursor
+        ),
+        "{err:?}"
+    );
+    assert!(mock.requests().is_empty(), "nothing reached the exchange");
+}
+
+#[tokio::test]
 async fn transfer_sends_the_amount_and_direction_and_returns_the_moved_amount() {
     let mock = MockExchange::start().await;
     mock.on("POST", "/private/v1/account/transfer")
@@ -281,14 +304,38 @@ async fn transfer_requires_exactly_one_entry_in_the_answer() {
             .await
             .expect_err("not exactly one entry");
 
-        match err {
+        match &err {
             Error::Protocol(p) => assert_eq!(
                 p.kind(),
                 &ProtocolErrorKind::Postcondition(Postcondition::ExpectedOneEntry { actual })
             ),
             other => panic!("expected a postcondition failure, got {other:?}"),
         }
+        assert!(
+            err.outcome_unknown() && err.accepted_but_unreadable(),
+            "status 0 means the transfer went through; the amount is unknown: {err:?}"
+        );
     }
+}
+
+#[tokio::test]
+async fn a_zero_transfer_never_leaves_the_client() {
+    let mock = MockExchange::start().await;
+
+    let err = authed(&mock)
+        .transfer(Amount::parse("0").unwrap(), TransferType::Deposit)
+        .await
+        .expect_err("zero amount");
+
+    assert!(
+        matches!(
+            &err,
+            Error::Contract(ContractViolation::InvalidValue(v))
+                if v.primitive == gmo_coin_api_client::Primitive::Amount
+        ),
+        "{err:?}"
+    );
+    assert!(mock.requests().is_empty(), "nothing reached the exchange");
 }
 
 #[tokio::test]

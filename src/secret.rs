@@ -100,7 +100,7 @@ impl ApiSecret {
         }
         let tag = ctx.sign();
         const HEX: &[u8; 16] = b"0123456789abcdef";
-        let mut hex = [0u8; 64];
+        let mut hex = Zeroizing::new([0u8; 64]);
         for (i, b) in tag.as_ref().iter().enumerate() {
             hex[2 * i] = HEX[usize::from(b >> 4)];
             hex[2 * i + 1] = HEX[usize::from(b & 0x0f)];
@@ -217,12 +217,12 @@ pub(crate) struct AuthHeaders<'a> {
 }
 
 /// 小文字 16 進数 64 桁。秘匿対象: 新しい署名は取引所のタイムスタンプ窓が
-/// 閉じるまで再生可能である。
-pub(crate) struct Signature([u8; 64]);
+/// 閉じるまで再生可能である。drop 時にゼロ埋めされる。
+pub(crate) struct Signature(Zeroizing<[u8; 64]>);
 
 impl Signature {
     pub(crate) fn as_str(&self) -> &str {
-        core::str::from_utf8(&self.0).unwrap_or_default()
+        core::str::from_utf8(&*self.0).unwrap_or_default()
     }
 }
 

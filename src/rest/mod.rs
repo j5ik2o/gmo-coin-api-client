@@ -15,11 +15,17 @@
 //!
 //! すべての REST メソッドは次の共通集合で失敗し得る。各メソッド自身の
 //! `# エラー` 節は、そのメソッドに固有のものだけを加える。
-//! - `Transport`: 完全な答えがない。お金を動かすものを再送する前に
-//!   `Error::outcome_unknown` を確かめること。
+//! - `Transport`: 完全な答えがない。
 //! - `Protocol`: 文書化された形でない答え (フェイルクローズド)。
 //! - `Api`: `status != 0`。たとえば ERR-5003 (`Error::is_rate_limited`)、
 //!   ERR-5201/5202 (メンテナンス)、ERR-5008/5009 (ローカル時計のずれ)。
+//!
+//! 状態を変える呼び出し (GET 以外) では、`Transport` と `Protocol` のどちらも
+//! 「取引所が適用したかもしれない」を意味し得る。再送や照会の前に
+//! [`Error::outcome_unknown`] を見ること。`status == 0` は読めたが `data` が
+//! 読めなかった、または事後条件に反したときは [`Error::accepted_but_unreadable`]
+//! も真で、適用されたことは確定している。`Api` は取引所が拒否した答えなので
+//! 適用されていない。
 //!
 //! 各メソッドの本体は同じ 4 段階である。型では表せない事前条件を検査し、
 //! `Call` を組み立て、送り (エンベロープは `Client::send` の中で一度だけ検査
@@ -50,8 +56,7 @@ use std::time::SystemTime;
 
 use http_body_util::Full;
 use hyper::body::Bytes;
-use serde::Serialize;
-use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use crate::client::{Access, Authenticated, Client};
@@ -165,20 +170,21 @@ impl core::fmt::Debug for Answer {
 }
 
 impl Answer {
-    /// `data` を `T` としてデコードする。
+    /// `data` を `T` としてデコードする。答えを消費しないので、事後条件の
+    /// エラーは同じ答えから作れる。`T` は `data` の生テキストを借用してよい
+    /// (`WireCancelOrders<'a>` など)。
     ///
     /// # エラー
     /// `data` がなければ `Protocol(MissingData)`、`T` と一致しなければ
     /// `Protocol(Shape)`。既定値を補うことはない。
-    pub(crate) fn data<T: DeserializeOwned>(self) -> Result<T> {
-        let Some(raw) = &self.data else {
+    pub(crate) fn data<'a, T: Deserialize<'a>>(&'a self) -> Result<T> {
+        let Some(raw) = self.raw() else {
             return Err(self.protocol(ProtocolErrorKind::MissingData));
         };
         serde_json::from_str(raw).map_err(|e| self.shape_error(&e))
     }
 
-    /// `data` の生テキスト。借用デコード (`WireCancelOrders<'a>` など) や、
-    /// serde を通さずに値を取り出す呼び出し元のため。
+    /// `data` の生テキスト。
     pub(crate) fn raw(&self) -> Option<&str> {
         self.data.as_deref().map(String::as_str)
     }
@@ -199,7 +205,7 @@ impl Answer {
     }
 
     /// serde のエラーを位置だけに落とす。メッセージは値を引用するので捨てる。
-    pub(crate) fn shape_error(&self, e: &serde_json::Error) -> Error {
+    fn shape_error(&self, e: &serde_json::Error) -> Error {
         self.protocol(ProtocolErrorKind::Shape {
             line: e.line(),
             column: e.column(),
@@ -233,13 +239,11 @@ impl<A: Access> Client<A> {
         let route = Route {
             api,
             operation: call.endpoint.operation,
-            method: call.endpoint.method,
             base,
             pool,
         };
         let target = call.target(&base.prefix);
         let host = base.host_header();
-        // 古い接続での GET 再試行ではもう一度呼ばれる: タイムスタンプと署名が新しくなる。
         let mut encode = || {
             let mut request = http::Request::builder()
                 .method(call.endpoint.method.to_http())
@@ -353,13 +357,85 @@ impl PageRequest {
     }
 }
 
+/// 取引所のリスト型オブジェクトの生の形。`list` と `pagination` を取り出し、
+/// それ以外のキーは数えるだけで捨てる。
+///
+/// 空の結果の形は `{}` だけなので、[`Page`] と `List` (`trading.rs`) は
+/// `other_keys` を見て「空」と「形の誤り」を分ける。`{"items": [...]}` の
+/// ように `list` を欠いて他のキーを持つオブジェクトを、空の結果として
+/// 読んでしまわないためである。`list` がある場合、他のキーは無視する。
+pub(crate) struct WireListing<T> {
+    pub(crate) list: Option<Vec<T>>,
+    pub(crate) pagination: Option<Pagination>,
+    pub(crate) other_keys: usize,
+}
+
+impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for WireListing<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> core::result::Result<Self, D::Error> {
+        use serde::de::{Error, IgnoredAny, MapAccess, Visitor};
+
+        #[derive(serde::Deserialize)]
+        #[serde(field_identifier, rename_all = "lowercase")]
+        enum Key {
+            List,
+            Pagination,
+            #[serde(other)]
+            Other,
+        }
+
+        struct ListingVisitor<T>(core::marker::PhantomData<T>);
+
+        impl<'de, T: serde::Deserialize<'de>> Visitor<'de> for ListingVisitor<T> {
+            type Value = WireListing<T>;
+
+            fn expecting(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                f.write_str("an object with optional list and pagination keys")
+            }
+
+            fn visit_map<M: MapAccess<'de>>(
+                self,
+                mut map: M,
+            ) -> core::result::Result<Self::Value, M::Error> {
+                let mut listing = WireListing {
+                    list: None,
+                    pagination: None,
+                    other_keys: 0,
+                };
+                while let Some(key) = map.next_key::<Key>()? {
+                    match key {
+                        Key::List => {
+                            if listing.list.is_some() {
+                                return Err(M::Error::duplicate_field("list"));
+                            }
+                            listing.list = Some(map.next_value()?);
+                        }
+                        Key::Pagination => {
+                            if listing.pagination.is_some() {
+                                return Err(M::Error::duplicate_field("pagination"));
+                            }
+                            listing.pagination = Some(map.next_value()?);
+                        }
+                        Key::Other => {
+                            map.next_value::<IgnoredAny>()?;
+                            listing.other_keys += 1;
+                        }
+                    }
+                }
+                Ok(listing)
+            }
+        }
+
+        d.deserialize_map(ListingVisitor(core::marker::PhantomData))
+    }
+}
+
 /// ページ番号で区切られたリストの 1 ページ。
 ///
 /// 取引所は 2 つの形を送り、どちらも明示的に受け付ける:
 /// `{"pagination": {...}, "list": [...]}` と、空の結果に対する `{}`。
 /// 後者は公式ドキュメントにない。本番 API が空の `activeOrders` にそう答えた
-/// 記憶に基づくもので、リリース前に本番で確かめる必要がある (DESIGN.md の
-/// 未解決事項を参照)。それ以外の形は `Protocol` エラーである。
+/// 記憶に基づくもので、本番で確かめる必要がある (未解決)。それ以外の形は
+/// `Protocol` エラーである。
 ///
 /// # 不変条件
 /// `pagination.is_none()` ならば `items.is_empty()`。
@@ -392,18 +468,12 @@ pub struct Pagination {
 }
 
 impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for Page<T> {
-    /// `{}` は空のページ。`pagination` と `list` がそろっていればそのページ。
-    /// 片方だけなら形の誤り。他のキーは無視する。
+    /// `{}` は空のページ。`pagination` と `list` がそろっていればそのページで、
+    /// 他のキーは無視する。片方だけ、または `{}` 以外で両方欠けていれば形の誤り。
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> core::result::Result<Self, D::Error> {
-        #[derive(serde::Deserialize)]
-        #[serde(bound(deserialize = "T: serde::Deserialize<'de>"))]
-        struct Wire<T> {
-            pagination: Option<Pagination>,
-            list: Option<Vec<T>>,
-        }
-        let wire = Wire::<T>::deserialize(d)?;
+        let wire = WireListing::<T>::deserialize(d)?;
         match (wire.pagination, wire.list) {
-            (None, None) => Ok(Page {
+            (None, None) if wire.other_keys == 0 => Ok(Page {
                 items: Vec::new(),
                 pagination: None,
             }),
@@ -412,7 +482,7 @@ impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for Page<T> {
                 pagination: Some(pagination),
             }),
             _ => Err(serde::de::Error::custom(
-                "pagination and list must come together",
+                "expected pagination and list together, or an empty object",
             )),
         }
     }
@@ -451,12 +521,26 @@ mod tests {
         );
         let empty: Page<u32> = serde_json::from_str("{}").unwrap();
         assert!(empty.items().is_empty() && empty.pagination().is_none());
+        let extra: Page<u32> = serde_json::from_str(
+            r#"{"pagination":{"currentPage":1,"count":1},"list":[7],"extra":true}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            extra.items(),
+            [7],
+            "unknown keys next to a list are ignored"
+        );
         assert!(serde_json::from_str::<Page<u32>>(r#"{"list":[1]}"#).is_err());
         assert!(
             serde_json::from_str::<Page<u32>>(r#"{"pagination":{"currentPage":1,"count":0}}"#)
                 .is_err()
         );
         assert!(serde_json::from_str::<Page<u32>>("[]").is_err());
+        assert!(
+            serde_json::from_str::<Page<u32>>(r#"{"items":[1]}"#).is_err(),
+            "a renamed list is a shape error, not an empty page"
+        );
+        assert!(serde_json::from_str::<Page<u32>>(r#"{"foo":1}"#).is_err());
     }
 
     #[test]
@@ -473,5 +557,21 @@ mod tests {
             "/public/v1/status"
         );
         assert_eq!(endpoint!(POST "/v1/order").operation, "POST /v1/order");
+    }
+
+    /// `Error::outcome_unknown` は操作名の先頭の語をメソッドとして読む。
+    #[test]
+    fn operation_starts_with_its_method() {
+        for endpoint in [
+            endpoint!(GET "/v1/x"),
+            endpoint!(POST "/v1/x"),
+            endpoint!(PUT "/v1/x"),
+            endpoint!(DELETE "/v1/x"),
+        ] {
+            assert_eq!(
+                endpoint.operation,
+                format!("{} /v1/x", endpoint.method.as_str())
+            );
+        }
     }
 }

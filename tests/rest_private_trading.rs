@@ -121,6 +121,33 @@ async fn orders_returns_an_empty_list_for_ids_the_exchange_does_not_know() {
 }
 
 #[tokio::test]
+async fn an_object_without_a_list_key_is_a_shape_error_not_an_empty_answer() {
+    let mock = MockExchange::start().await;
+    mock.on("GET", "/private/v1/orders").reply(Reply::Json(
+        r#"{"status":0,"data":{"items":[]}}"#.to_owned(),
+    ));
+    mock.on("GET", "/private/v1/activeOrders")
+        .reply(Reply::Json(r#"{"status":0,"data":{"foo":1}}"#.to_owned()));
+    let client = authed(&mock);
+
+    let orders = client
+        .orders(&OrderLookup::ByOrderIds(Batch::one(oid(1))))
+        .await
+        .expect_err("items is not list");
+    let active = client
+        .active_orders(Symbol::BTC, PageRequest::FIRST)
+        .await
+        .expect_err("foo is not a page");
+
+    for err in [orders, active] {
+        assert!(
+            matches!(&err, Error::Protocol(p) if matches!(p.kind(), ProtocolErrorKind::Shape { .. })),
+            "{err:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn an_order_that_was_not_asked_for_fails_the_postcondition() {
     let mock = MockExchange::start().await;
     mock.on("GET", "/private/v1/orders")
@@ -195,6 +222,34 @@ async fn an_empty_active_orders_answer_is_ok_with_no_items() {
     assert!(page.pagination().is_none());
 }
 
+fn execution_json(
+    execution_id: u64,
+    order_id: u64,
+    client_order_id: Option<&str>,
+) -> serde_json::Value {
+    let mut execution = json!({
+        "executionId": execution_id,
+        "orderId": order_id,
+        "positionId": 1234567,
+        "symbol": "BTC",
+        "side": "BUY",
+        "settleType": "OPEN",
+        "size": "0.02",
+        "price": "1900000",
+        "lossGain": "0",
+        "fee": "223",
+        "timestamp": "2020-11-24T21:27:04.764Z"
+    });
+    if let Some(client_order_id) = client_order_id {
+        execution["clientOrderId"] = json!(client_order_id);
+    }
+    execution
+}
+
+fn executions_reply(list: Vec<serde_json::Value>) -> Reply {
+    Reply::Json(json!({"status": 0, "data": {"list": list}}).to_string())
+}
+
 #[tokio::test]
 async fn executions_use_one_query_key_per_lookup_kind() {
     let mock = MockExchange::start().await;
@@ -207,7 +262,10 @@ async fn executions_use_one_query_key_per_lookup_kind() {
             .signed()
             .query(query)
             .times(1)
-            .fixture("private_get_executions.json");
+            .reply(executions_reply(vec![
+                execution_json(92123912, 223456789, Some("abc123")),
+                execution_json(72123911, 223456789, Some("abc123")),
+            ]));
     }
     let client = authed(&mock);
     let ids = Batch::new(vec![
@@ -236,8 +294,35 @@ async fn executions_use_one_query_key_per_lookup_kind() {
     );
     assert_eq!(by_order[0].settle_type, SettleType::Open);
     assert_eq!(by_order[0].fee.to_string(), "223");
-    assert_eq!(by_order[1].client_order_id, None);
     mock.assert_done();
+}
+
+#[tokio::test]
+async fn an_execution_that_does_not_match_the_lookup_fails_the_postcondition() {
+    let stray_id = ExecutionId::new(72123911).unwrap();
+    let lookups = [
+        ExecutionLookup::ByOrderId(oid(223456789)),
+        ExecutionLookup::ByClientOrderId(cid("abc123")),
+        ExecutionLookup::ByExecutionIds(Batch::one(ExecutionId::new(92123912).unwrap())),
+    ];
+    for lookup in lookups {
+        let mock = MockExchange::start().await;
+        mock.on("GET", "/private/v1/executions")
+            .fixture("private_get_executions.json");
+
+        let err = authed(&mock).executions(&lookup).await.expect_err(
+            "the fixture holds an execution of another order, without a client order id",
+        );
+
+        match err {
+            Error::Protocol(p) => assert_eq!(
+                p.kind(),
+                &ProtocolErrorKind::Postcondition(Postcondition::ExecutionNotRequested(stray_id)),
+                "{lookup:?}"
+            ),
+            other => panic!("{other:?}"),
+        }
+    }
 }
 
 #[tokio::test]
@@ -475,6 +560,97 @@ async fn a_dropped_connection_leaves_the_order_outcome_unknown_and_the_resend_ke
     mock.assert_done();
 }
 
+/// README の「注文を出す」の手順そのもの。結果不明なら同じ注文を再送し、
+/// ERR-915 なら顧客注文 ID で照会する。
+async fn place_or_recover(
+    client: &Client<Authenticated>,
+    order: &NewOrder,
+) -> Result<OrderId, Box<dyn std::error::Error>> {
+    match client.place_order(order).await {
+        Ok(id) => Ok(id),
+        Err(e) if e.outcome_unknown() => match client.place_order(order).await {
+            Ok(id) => Ok(id),
+            Err(Error::Api(api)) if api.has(ErrorCode::CLIENT_ORDER_ID_USED) => {
+                let lookup =
+                    OrderLookup::ByClientOrderIds(Batch::one(order.client_order_id.clone()));
+                let orders = client.orders(&lookup).await?;
+                Ok(orders
+                    .first()
+                    .ok_or("ERR-915 なのに注文が照会できない")?
+                    .order_id)
+            }
+            Err(e) => Err(e.into()),
+        },
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn order_with_client_id(order_id: u64, client_order_id: &str) -> Reply {
+    Reply::Json(
+        json!({"status": 0, "data": {"list": [{
+            "orderId": order_id, "clientOrderId": client_order_id, "rootOrderId": order_id,
+            "symbol": "BTC", "side": "BUY", "orderType": "NORMAL", "executionType": "LIMIT",
+            "settleType": "OPEN", "size": "0.02", "executedSize": "0", "price": "1430001",
+            "losscutPrice": "0", "status": "ORDERED", "timeInForce": "FAS",
+            "timestamp": "2020-10-14T20:18:59.343Z"
+        }]}})
+        .to_string(),
+    )
+}
+
+#[tokio::test]
+async fn the_readme_recipe_recovers_the_order_id_after_a_drop_and_err_915() {
+    let mock = MockExchange::start().await;
+    mock.on("POST", "/private/v1/order")
+        .times(1)
+        .reply(Reply::DropConnection);
+    mock.on("POST", "/private/v1/order")
+        .signed()
+        .times(1)
+        .reply(Reply::Json(api_error(
+            "ERR-915",
+            "The clientOrderId was already used.",
+        )));
+    mock.on("GET", "/private/v1/orders")
+        .signed()
+        .query("clientOrderId=abc123")
+        .times(1)
+        .reply(order_with_client_id(223456789, "abc123"));
+    let client = authed(&mock);
+
+    let id = place_or_recover(&client, &limit_buy(Symbol::BTC))
+        .await
+        .expect("recovered");
+
+    assert_eq!(id, oid(223456789));
+    assert_eq!(mock.requests().len(), 3, "drop, resend, lookup");
+    mock.assert_done();
+}
+
+#[tokio::test]
+async fn the_readme_recipe_reports_an_empty_lookup_as_an_error_not_a_panic() {
+    let mock = MockExchange::start().await;
+    mock.on("POST", "/private/v1/order")
+        .times(1)
+        .reply(Reply::DropConnection);
+    mock.on("POST", "/private/v1/order")
+        .times(1)
+        .reply(Reply::Json(api_error(
+            "ERR-915",
+            "The clientOrderId was already used.",
+        )));
+    mock.on("GET", "/private/v1/orders")
+        .reply(Reply::Json(r#"{"status":0,"data":{}}"#.to_owned()));
+    let client = authed(&mock);
+
+    let err = place_or_recover(&client, &limit_buy(Symbol::BTC))
+        .await
+        .expect_err("nothing to recover");
+
+    assert!(err.to_string().contains("ERR-915"), "{err}");
+    mock.assert_done();
+}
+
 #[tokio::test]
 async fn a_stalled_exchange_also_leaves_the_order_outcome_unknown() {
     let mock = MockExchange::start().await;
@@ -508,9 +684,88 @@ async fn a_non_numeric_order_id_in_the_answer_is_a_protocol_error() {
         .expect_err("bad id");
 
     assert!(matches!(
-        err,
+        &err,
         Error::Protocol(p) if matches!(p.kind(), ProtocolErrorKind::Shape { .. })
     ));
+    assert!(
+        err.accepted_but_unreadable(),
+        "status 0 means the order exists; only its id was lost: {err:?}"
+    );
+    assert!(err.outcome_unknown(), "{err:?}");
+}
+
+#[tokio::test]
+async fn a_gateway_error_after_a_post_leaves_the_order_outcome_unknown() {
+    let mock = MockExchange::start().await;
+    mock.on("POST", "/private/v1/order").reply(Reply::Status {
+        code: 502,
+        body: "<html>bad gateway</html>".to_owned(),
+    });
+
+    let err = authed(&mock)
+        .place_order(&limit_buy(Symbol::BTC))
+        .await
+        .expect_err("502");
+
+    assert!(matches!(
+        &err,
+        Error::Protocol(p) if *p.kind() == ProtocolErrorKind::HttpStatus(502)
+    ));
+    assert!(
+        err.outcome_unknown(),
+        "a gateway answered, the exchange may still have placed the order: {err:?}"
+    );
+    assert!(
+        !err.accepted_but_unreadable(),
+        "nothing says it was accepted"
+    );
+}
+
+#[tokio::test]
+async fn a_success_envelope_behind_a_non_2xx_status_is_not_an_accepted_order() {
+    let mock = MockExchange::start().await;
+    mock.on("POST", "/private/v1/order").reply(Reply::Status {
+        code: 502,
+        body: support::fixture("private_post_order.json"),
+    });
+
+    let err = authed(&mock)
+        .place_order(&limit_buy(Symbol::BTC))
+        .await
+        .expect_err("502 wraps a stale or cached body");
+
+    assert!(matches!(
+        &err,
+        Error::Protocol(p) if *p.kind() == ProtocolErrorKind::HttpStatus(502)
+    ));
+    assert!(err.outcome_unknown(), "{err:?}");
+    assert!(!err.accepted_but_unreadable(), "{err:?}");
+}
+
+#[tokio::test]
+async fn a_success_envelope_without_data_after_a_post_is_accepted_but_unreadable() {
+    let mock = MockExchange::start().await;
+    mock.on("POST", "/private/v1/closeOrder")
+        .reply(Reply::Json(r#"{"status":0}"#.to_owned()));
+
+    let err = authed(&mock)
+        .close_position(&ClosePosition {
+            client_order_id: cid("close1"),
+            symbol: Symbol::BTC_JPY,
+            side: Side::Sell,
+            position_id: PositionId::new(1234567).unwrap(),
+            size: size("0.1"),
+            execution: CloseExecution::Market,
+        })
+        .await
+        .expect_err("no data");
+
+    assert!(matches!(
+        &err,
+        Error::Protocol(p) if *p.kind() == ProtocolErrorKind::MissingData
+    ));
+    assert!(err.accepted_but_unreadable(), "{err:?}");
+    assert!(err.outcome_unknown(), "{err:?}");
 }
 
 #[tokio::test]
@@ -606,10 +861,43 @@ async fn cancel_orders_rejects_an_id_reported_twice() {
     let err = authed(&mock).cancel_orders(&sent).await.expect_err("twice");
 
     assert!(matches!(
-        err,
+        &err,
         Error::Protocol(p) if p.kind()
             == &ProtocolErrorKind::Postcondition(Postcondition::CancelResultIdRepeated(oid(3)))
     ));
+    assert!(
+        err.outcome_unknown(),
+        "the exchange accepted the cancel; which ids it took is unknown: {err:?}"
+    );
+    assert!(err.accepted_but_unreadable(), "{err:?}");
+}
+
+#[tokio::test]
+async fn cancel_orders_with_a_malformed_rejection_is_still_an_accepted_answer() {
+    let mock = MockExchange::start().await;
+    mock.on("POST", "/private/v1/cancelOrders").reply(Reply::Json(
+        r#"{"status":0,"data":{"success":[],"failed":[{"orderId":1,"message_code":"5122","message_string":"x"}]}}"#
+            .to_owned(),
+    ));
+    let sent = Batch::new(vec![oid(1)]).unwrap();
+
+    let err = authed(&mock)
+        .cancel_orders(&sent)
+        .await
+        .expect_err("code without the ERR- prefix");
+
+    assert!(
+        matches!(
+            &err,
+            Error::Protocol(p) if p.kind()
+                == &ProtocolErrorKind::Postcondition(Postcondition::CancelRejectionMalformed(oid(1)))
+        ),
+        "{err:?}"
+    );
+    assert!(
+        err.outcome_unknown() && err.accepted_but_unreadable(),
+        "status 0 means the exchange processed the cancel: {err:?}"
+    );
 }
 
 #[tokio::test]
@@ -649,6 +937,59 @@ async fn cancel_bulk_orders_sends_the_filter_and_returns_the_ids() {
     assert_eq!(narrowed, [oid(637000), oid(637002)]);
     assert_eq!(plain, narrowed);
     mock.assert_done();
+}
+
+fn bulk_cancel_filter() -> BulkCancel {
+    BulkCancel {
+        symbols: vec![Symbol::BTC],
+        side: None,
+        settle_type: None,
+        newest_first: false,
+    }
+}
+
+async fn bulk_cancel_answering(ids: Vec<u64>) -> Result<Vec<OrderId>, Error> {
+    let mock = MockExchange::start().await;
+    mock.on("POST", "/private/v1/cancelBulkOrder")
+        .reply(Reply::Json(json!({"status": 0, "data": ids}).to_string()));
+    authed(&mock)
+        .cancel_bulk_orders(&bulk_cancel_filter())
+        .await
+}
+
+#[tokio::test]
+async fn cancel_bulk_orders_accepts_exactly_ten_ids() {
+    let ids = bulk_cancel_answering((1..=10).collect())
+        .await
+        .expect("ten ids");
+
+    assert_eq!(ids, (1..=10).map(oid).collect::<Vec<_>>());
+}
+
+#[tokio::test]
+async fn cancel_bulk_orders_rejects_more_than_ten_ids() {
+    let err = bulk_cancel_answering((1..=11).collect())
+        .await
+        .expect_err("eleven ids");
+
+    assert!(matches!(
+        err,
+        Error::Protocol(p) if p.kind()
+            == &ProtocolErrorKind::Postcondition(Postcondition::BulkCancelTooManyIds { actual: 11 })
+    ));
+}
+
+#[tokio::test]
+async fn cancel_bulk_orders_rejects_a_repeated_id() {
+    let err = bulk_cancel_answering(vec![5, 6, 5])
+        .await
+        .expect_err("id 5 twice");
+
+    assert!(matches!(
+        err,
+        Error::Protocol(p) if p.kind()
+            == &ProtocolErrorKind::Postcondition(Postcondition::BulkCancelIdRepeated(oid(5)))
+    ));
 }
 
 #[tokio::test]

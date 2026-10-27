@@ -2,13 +2,16 @@
 //!
 //! すべての variant は「誰の責任か」と「何かが送られたか」に答える。
 //!
-//! | variant      | 責任                       | リクエストは送られたか     |
-//! |--------------|----------------------------|----------------------------|
-//! | `Contract`   | 呼び出し側の入力           | 決して送られない           |
-//! | `Api`        | 取引所が拒否した           | 送られ、処理された         |
-//! | `Protocol`   | 取引所が形を破った         | 送られた                   |
-//! | `Transport`  | ネットワーク、TLS、上限    | [`Delivery`] を参照        |
-//! | `FeedClosed` | フィードは既に終了         | 該当しない                 |
+//! | variant      | 責任                       | リクエストは送られたか     | 適用されたか                         |
+//! |--------------|----------------------------|----------------------------|--------------------------------------|
+//! | `Contract`   | 呼び出し側の入力           | 決して送られない           | いいえ                               |
+//! | `Api`        | 取引所が拒否した           | 送られ、処理された         | いいえ                               |
+//! | `Protocol`   | 取引所が形を破った         | 送られた                   | 不明 ([`Error::outcome_unknown`])    |
+//! | `Transport`  | ネットワーク、TLS、上限    | [`Delivery`] を参照        | `MaybeSent` なら不明                 |
+//! | `FeedClosed` | フィードは既に終了         | 該当しない                 | 該当しない                           |
+//!
+//! 「適用されたか」は GET 以外の REST 呼び出しについての問いである。答えは
+//! [`Error::outcome_unknown`] と [`Error::accepted_but_unreadable`] が返す。
 //!
 //! 秘匿は構造によって保証される。エラーが持つのは `&'static str` の操作名
 //! (`"POST /v1/order"`)、`ApiGroup`、数値コード、`io::ErrorKind` だけである。
@@ -19,7 +22,7 @@
 use core::fmt;
 use std::io;
 
-use crate::domain::{InvalidValue, OrderId, Timestamp};
+use crate::domain::{ExecutionId, InvalidValue, OrderId, Timestamp};
 
 pub type Result<T, E = Error> = core::result::Result<T, E>;
 
@@ -50,8 +53,38 @@ impl Error {
     /// 状態を変えるリクエストが効いたかどうか分からない。注文なら同じ
     /// `ClientOrderId` で再送する。ERR-915 が返れば最初の試行は発注されて
     /// おり、`orders(OrderLookup::ByClientOrderIds)` がそれを返す。
+    ///
+    /// 真になるのは次の 2 つである。
+    /// - `Transport` で [`Delivery::MaybeSent`]: 書き込みが始まった後に失敗した
+    ///   (GET でも真になる。これは送られた事実の記録である)。
+    /// - GET 以外の REST 呼び出しの後の `Protocol`: 答えは届いたが読めなかった。
+    ///   ゲートウェイの 502、エンベロープでない本文、`status == 0` なのに
+    ///   `data` が読めない、事後条件違反。どれも取引所が適用した可能性がある。
+    ///   `status == 0` を読めた場合は [`Error::accepted_but_unreadable`] も真で、
+    ///   適用されたことは確定している。
+    ///
+    /// `Api` (取引所が拒否した) と `Contract` (送っていない) では偽。
     pub fn outcome_unknown(&self) -> bool {
-        matches!(self, Error::Transport(t) if t.delivery == Delivery::MaybeSent)
+        match self {
+            Error::Transport(t) => t.delivery == Delivery::MaybeSent,
+            Error::Protocol(p) => p.after_state_change(),
+            Error::Contract(_) | Error::Api(_) | Error::FeedClosed => false,
+        }
+    }
+
+    /// GET 以外の REST 呼び出しで、取引所は `status == 0` で受け付けたが、
+    /// 答え (`data`) を読めなかった。リクエストは適用されている。注文なら
+    /// 発注済みで、`OrderId` だけが失われたので、
+    /// `orders(OrderLookup::ByClientOrderIds)` で引く。再送は不要で、しても
+    /// ERR-915 が返るだけである。`outcome_unknown` も真になる。
+    ///
+    /// GET の後の同じ種類のエラー (たとえば `ticker()` の `WrongSymbol`) では
+    /// 偽。読み取りは何も適用しないので、問い自体が成り立たない。
+    pub fn accepted_but_unreadable(&self) -> bool {
+        matches!(
+            self,
+            Error::Protocol(p) if p.after_state_change() && p.kind.after_acceptance()
+        )
     }
 }
 
@@ -110,6 +143,8 @@ impl fmt::Display for ContractViolation {
         }
     }
 }
+
+impl std::error::Error for ContractViolation {}
 
 impl From<InvalidValue> for ContractViolation {
     fn from(v: InvalidValue) -> Self {
@@ -174,6 +209,8 @@ impl fmt::Display for ApiError {
     }
 }
 
+impl std::error::Error for ApiError {}
+
 /// `{message_code, message_string}` の 1 組。エラーエンベロープ、または
 /// `cancelOrders` の失敗エントリから来る。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -184,9 +221,10 @@ pub struct ApiMessage {
 }
 
 /// `ERR-<n>` を数値にしたもの。構造上開いている: 未知のコードも単なる値で
-/// あり、文書化されたコードは `match` で使える定数である。
+/// あり、文書化されたコードは `match` で使える定数である。5 桁 (99999 まで)
+/// を収めるので `u32`。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct ErrorCode(pub u16);
+pub struct ErrorCode(pub u32);
 
 impl ErrorCode {
     pub const WRONG_POSITION_SIDE: ErrorCode = ErrorCode(70);
@@ -288,6 +326,15 @@ impl ProtocolError {
     pub fn kind(&self) -> &ProtocolErrorKind {
         &self.kind
     }
+
+    /// GET 以外の REST 呼び出しの後に起きたか。`operation` は `endpoint!` が
+    /// メソッド名と空白とパスから組み立てるので、先頭の語がメソッドである
+    /// (`rest` のテスト `operation_starts_with_its_method` が固定している)。
+    /// WebSocket の操作名はこの形でないので `api` で除く。
+    fn after_state_change(&self) -> bool {
+        matches!(self.api, ApiGroup::PublicRest | ApiGroup::PrivateRest)
+            && !self.operation.starts_with("GET ")
+    }
 }
 
 impl fmt::Display for ProtocolError {
@@ -329,10 +376,13 @@ impl fmt::Display for ProtocolError {
     }
 }
 
+impl std::error::Error for ProtocolError {}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ProtocolErrorKind {
-    /// HTTP 状態が 2xx の外で、本文がエンベロープでない (404、503)。
+    /// HTTP 状態が 2xx の外で、本文がエンベロープでない (404、503)、または
+    /// 本文が `status == 0` のエンベロープだった (2xx の外の成功は受付でない)。
     HttpStatus(u16),
     /// 本文が整数 `status` を持つ JSON オブジェクトでない。
     NotAnEnvelope,
@@ -351,6 +401,21 @@ pub enum ProtocolErrorKind {
     WsMessage { line: usize, column: usize },
 }
 
+impl ProtocolErrorKind {
+    /// `status == 0` のエンベロープを受け取った後にしか起きない種類か。
+    /// これらは `Answer` (成功エンベロープ) からしか作られない。逆に
+    /// `HttpStatus`、`NotAnEnvelope`、`MalformedErrorEnvelope` はエンベロープの
+    /// 検査 (`envelope::parse`) からしか作られない。
+    fn after_acceptance(&self) -> bool {
+        matches!(
+            self,
+            ProtocolErrorKind::MissingData
+                | ProtocolErrorKind::Shape { .. }
+                | ProtocolErrorKind::Postcondition(_)
+        )
+    }
+}
+
 /// 名前付きの事後条件。テストと呼び出し側が正確な規則で照合できる。
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -359,11 +424,20 @@ pub enum Postcondition {
     CancelResultIdNotRequested(OrderId),
     /// `cancelOrders` が 1 つの id を取消済みと失敗の両方、または二度報告した。
     CancelResultIdRepeated(OrderId),
+    /// `cancelOrders` の `failed` エントリの理由が、`ERR-<n>` のコードと
+    /// 512 バイト以下の文章という形でなかった。
+    CancelRejectionMalformed(OrderId),
     /// `ticker(symbol)` / `order_book(symbol)` が別の銘柄で答えた、または
     /// エントリがちょうど 1 件でなかった。
     WrongSymbol,
     /// `orders(..)` が、検索で指定していない注文を返した。
     OrderNotRequested(OrderId),
+    /// `executions(..)` が、検索で指定していない約定を返した。
+    ExecutionNotRequested(ExecutionId),
+    /// `cancel_bulk_orders` が、1 回の上限 (10 件) を超える id を返した。
+    BulkCancelTooManyIds { actual: usize },
+    /// `cancel_bulk_orders` が同じ id を二度返した。
+    BulkCancelIdRepeated(OrderId),
     /// 1 件のはずの `data` 配列 (`account/transfer`) が別の長さだった。
     ExpectedOneEntry { actual: usize },
 }
@@ -377,9 +451,21 @@ impl fmt::Display for Postcondition {
             Postcondition::CancelResultIdRepeated(id) => {
                 write!(f, "注文 id {id} が結果に二度現れました")
             }
+            Postcondition::CancelRejectionMalformed(id) => {
+                write!(f, "注文 id {id} の拒否理由が規約の形ではありません")
+            }
             Postcondition::WrongSymbol => f.write_str("要求した銘柄と応答の銘柄が一致しません"),
             Postcondition::OrderNotRequested(id) => {
                 write!(f, "要求していない注文 {id} が返されました")
+            }
+            Postcondition::ExecutionNotRequested(id) => {
+                write!(f, "要求していない約定 {id} が返されました")
+            }
+            Postcondition::BulkCancelTooManyIds { actual } => {
+                write!(f, "一括取消の結果が上限 10 件を超えて {actual} 件でした")
+            }
+            Postcondition::BulkCancelIdRepeated(id) => {
+                write!(f, "一括取消の結果に注文 id {id} が二度現れました")
             }
             Postcondition::ExpectedOneEntry { actual } => {
                 write!(f, "エントリは 1 件のはずが {actual} 件でした")
@@ -439,6 +525,8 @@ impl fmt::Display for TransportError {
     }
 }
 
+impl std::error::Error for TransportError {}
+
 /// リクエストが取引所に届いた可能性があるか。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Delivery {
@@ -490,6 +578,25 @@ impl fmt::Display for Phase {
 mod tests {
     use super::*;
 
+    /// 呼び出し側が `Box<dyn std::error::Error>` を返す関数で `?` を使えること。
+    /// `Feed::subscribe` は `ContractViolation` をそのまま返す唯一の公開 API で、
+    /// I/O なしに呼べる。
+    #[test]
+    fn every_detail_type_is_an_error_so_question_mark_boxes_it() {
+        fn subscribe_with_question_mark() -> Result<(), Box<dyn std::error::Error>> {
+            use crate::ws::PublicChannel;
+            let mut feed = crate::Client::production().public_feed();
+            feed.subscribe(PublicChannel::Ticker(crate::Symbol::BTC))?;
+            Ok(())
+        }
+        fn is_error<E: std::error::Error + Send + Sync + 'static>() {}
+        is_error::<ContractViolation>();
+        is_error::<ApiError>();
+        is_error::<ProtocolError>();
+        is_error::<TransportError>();
+        subscribe_with_question_mark().unwrap();
+    }
+
     #[test]
     fn error_codes_parse_only_the_documented_shape() {
         assert_eq!(ErrorCode::parse("ERR-5003"), Some(ErrorCode::RATE_LIMIT));
@@ -498,6 +605,11 @@ mod tests {
             Some(ErrorCode::WRONG_POSITION_SIDE)
         );
         assert_eq!(ErrorCode::parse("ERR-"), None);
+        assert_eq!(
+            ErrorCode::parse("ERR-70000"),
+            Some(ErrorCode(70000)),
+            "five digits reach past u16"
+        );
         assert_eq!(ErrorCode::parse("ERR-123456"), None);
         assert_eq!(ErrorCode::parse("5003"), None);
         assert_eq!(ErrorCode::parse("ERR-5x"), None);
@@ -516,8 +628,58 @@ mod tests {
         });
         assert!(api.is_rate_limited());
         assert!(!api.outcome_unknown());
+        assert!(!api.accepted_but_unreadable());
         let text = api.to_string();
         assert!(text.contains("GET /v1/status") && text.contains("ERR-5003"));
+
+        let protocol = |api, operation, kind| {
+            Error::Protocol(ProtocolError {
+                api,
+                operation,
+                kind,
+            })
+        };
+        let post_gateway = protocol(
+            ApiGroup::PrivateRest,
+            "POST /v1/order",
+            ProtocolErrorKind::HttpStatus(502),
+        );
+        assert!(post_gateway.outcome_unknown());
+        assert!(!post_gateway.accepted_but_unreadable());
+        let post_unreadable = protocol(
+            ApiGroup::PrivateRest,
+            "POST /v1/order",
+            ProtocolErrorKind::Shape { line: 1, column: 1 },
+        );
+        assert!(post_unreadable.outcome_unknown());
+        assert!(post_unreadable.accepted_but_unreadable());
+        let delete_missing = protocol(
+            ApiGroup::PrivateRest,
+            "DELETE /v1/ws-auth",
+            ProtocolErrorKind::MissingData,
+        );
+        assert!(delete_missing.outcome_unknown() && delete_missing.accepted_but_unreadable());
+        let get_gateway = protocol(
+            ApiGroup::PublicRest,
+            "GET /v1/status",
+            ProtocolErrorKind::HttpStatus(502),
+        );
+        assert!(!get_gateway.outcome_unknown());
+        let get_unreadable = protocol(
+            ApiGroup::PublicRest,
+            "GET /v1/ticker",
+            ProtocolErrorKind::Postcondition(Postcondition::WrongSymbol),
+        );
+        assert!(
+            !get_unreadable.outcome_unknown() && !get_unreadable.accepted_but_unreadable(),
+            "a read changes nothing, so neither predicate applies"
+        );
+        let ws = protocol(
+            ApiGroup::PrivateWs,
+            "/v1",
+            ProtocolErrorKind::WsHandshake { http_status: 503 },
+        );
+        assert!(!ws.outcome_unknown() && !ws.accepted_but_unreadable());
 
         let unknown = Error::Transport(TransportError {
             api: ApiGroup::PrivateRest,

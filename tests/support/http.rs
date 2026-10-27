@@ -1,12 +1,14 @@
 //! モックの HTTP/1.1 サーバ側。hyper の `server::conn::http1` で動く。
 //!
 //! リクエスト処理の順序:
-//! 1. 認証ヘッダがあれば、または `/private` 配下なら、取引所と同じ順序で検査する
-//!    (`sign::check`)。`/private` で失敗したら、その ERR-50xx を HTTP 200 の
+//! 1. ボディを読み切り、認証ヘッダを取引所と同じ順序で検査して
+//!    (`sign::check`)、結果とともに記録する。
+//! 2. `DropConnection` の期待に一致すれば、認証の結果にかかわらず閉じる。
+//! 3. `/private` で認証に失敗していれば、その ERR-50xx を HTTP 200 の
 //!    エンベロープで返す。
-//! 2. 登録順に最初に一致する期待を探す。`times(n)` を使い切ったものは飛ばす。
-//! 3. 期待がなく `/private/v1/ws-auth` なら、組み込みの `TokenStore` ルート。
-//! 4. それ以外は未一致として記録し、404 を返す。`assert_done` が失敗する。
+//! 4. 登録順に最初に一致する期待を探す。`times(n)` を使い切ったものは飛ばす。
+//! 5. 期待がなく `/private/v1/ws-auth` なら、組み込みの `TokenStore` ルート。
+//! 6. それ以外は未一致として記録し、404 を返す。`assert_done` が失敗する。
 //!
 //! `CloseAfterRequest` と `DropConnection` はサービスがエラーを返すことで
 //! 実現する。hyper はその接続を応答なしで閉じる。
@@ -49,8 +51,10 @@ pub async fn serve(socket: TcpStream, state: Arc<Mutex<State>>) {
         .await;
 }
 
-/// 1 リクエストを処理する。ヘッダだけで決められること (認証、`DropConnection`)
-/// はボディを読む前に決める。
+/// 1 リクエストを処理する。ボディを読み切り、署名を検査して記録してから
+/// 応答を決める。`DropConnection` も記録までは同じで、認証の結果に
+/// かかわらず応答せずに閉じる (ネットワークが落ちたのであって、取引所が
+/// 拒否したのではない)。
 async fn handle(
     req: Request<Incoming>,
     state: Arc<Mutex<State>>,
@@ -70,47 +74,6 @@ async fn handle(
         header("API-SIGN"),
     );
     let at = Instant::now();
-
-    let drop_now = {
-        let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
-        let route = st.routes.iter_mut().find(|r| {
-            matches!(r.reply, Reply::DropConnection)
-                && r.json_body.is_none()
-                && r.method == method
-                && r.path == path
-                && r.query
-                    .as_ref()
-                    .is_none_or(|q| Some(q.as_str()) == query.as_deref())
-                && r.times.is_none_or(|n| r.hits < n)
-        });
-        match route {
-            Some(route) => {
-                route.hits += 1;
-                true
-            }
-            None => false,
-        }
-    };
-    if drop_now {
-        let signature = if key.is_none() && timestamp.is_none() && sign.is_none() {
-            SignatureCheck::Absent
-        } else {
-            SignatureCheck::Valid
-        };
-        state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .requests
-            .push(Recorded {
-                method,
-                path,
-                query,
-                body: Vec::new(),
-                signature,
-                at,
-            });
-        return Err(Dropped);
-    }
 
     let body = req
         .into_body()
@@ -138,6 +101,20 @@ async fn handle(
             at,
         });
         let index = st.requests.len() - 1;
+        let drop_now = st.routes.iter_mut().find(|r| {
+            matches!(r.reply, Reply::DropConnection)
+                && r.json_body.is_none()
+                && r.method == method
+                && r.path == path
+                && r.query
+                    .as_ref()
+                    .is_none_or(|q| Some(q.as_str()) == query.as_deref())
+                && r.times.is_none_or(|n| r.hits < n)
+        });
+        if let Some(route) = drop_now {
+            route.hits += 1;
+            return Err(Dropped);
+        }
         if path.starts_with("/private")
             && let Err(code) = auth
         {

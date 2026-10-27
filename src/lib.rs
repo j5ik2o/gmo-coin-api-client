@@ -49,9 +49,6 @@
 //! - REST の呼び出しは絞らない。ERR-5003 は `Error::is_rate_limited` で見える。
 
 #![forbid(unsafe_code)]
-// フェーズ 2 (Private REST) とフェーズ 3 (WebSocket) の本体が `todo!()` の間、
-// それらにしか呼ばれないクレート内部の項目は未使用になる。
-#![allow(dead_code)]
 
 mod client;
 mod domain;
@@ -62,13 +59,9 @@ mod secret;
 mod transport;
 pub mod ws;
 
-// クレート内部の呼び出し (ws-auth) をモック取引所に対して試すため、
-// 結合テスト用のモックを単体テストからも使えるようにする。
-#[cfg(test)]
-extern crate self as gmo_coin_api_client;
-#[cfg(test)]
-#[path = "../tests/support/mod.rs"]
-pub(crate) mod mock;
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;
 
 pub use client::{
     Access, Anonymous, Authenticated, Backoff, ByteLimit, Client, Config, Limits, Timeout, Timeouts,

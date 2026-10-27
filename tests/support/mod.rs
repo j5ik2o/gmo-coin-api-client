@@ -86,9 +86,11 @@ pub enum Reply {
     JsonThenClose(String),
     /// 同じ本文を `Transfer-Encoding: chunked` で、このサイズのチャンクに分けて送る。
     Chunked { body: String, chunk: usize },
-    /// リクエストを読み切ってから、答えずに閉じる (結果不明)。
+    /// リクエストを読み切ってから、答えずに閉じる (結果不明)。認証に失敗した
+    /// リクエストには、閉じる代わりに ERR-50xx が返る。
     CloseAfterRequest,
-    /// ヘッダを読んだ時点で、ボディを読まずに閉じる (結果不明)。
+    /// リクエストを読み切り、署名の検査結果を記録してから、認証の結果に
+    /// かかわらず答えずに閉じる (結果不明)。ネットワークが落ちた状況。
     DropConnection,
     /// 答える前に待つ。タイムアウトを試すため。
     Delay(Duration, Box<Reply>),

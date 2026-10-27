@@ -20,7 +20,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::{Answer, Call, endpoint};
+use super::{Call, endpoint};
 use crate::client::{Authenticated, Client};
 use crate::domain::{
     Amount, BusinessDate, BusinessDateRange, CryptoShortfallStatus, Decimal, FeeType,
@@ -216,6 +216,10 @@ fn history_call(call: Call, window: HistoryWindow) -> Call {
 }
 
 impl Client<Authenticated> {
+    /// `exchange_fee_history` の `cursor` の上限 (バイト)。取引所の例は 40 文字
+    /// ほどで、これより長い値はリクエスト行を膨らませるだけである。
+    pub const MAX_CURSOR_BYTES: usize = 256;
+
     /// `GET /private/v1/account/margin`。
     ///
     /// # 事前条件
@@ -417,15 +421,16 @@ impl Client<Authenticated> {
     ///
     /// # 事前条件
     /// [`BusinessDateRange`] が保証する (7 日以内、`from <= to`)。`count` は
-    /// `1..=100` で、そうでなければ `Contract` (リクエストは作られない)。
-    /// `cursor` は同じ `range` で取得したページのものでなければならない。
+    /// `1..=100`、`cursor` は [`Self::MAX_CURSOR_BYTES`] 以下で、そうでなければ
+    /// `Contract` (リクエストは作られない)。`cursor` は同じ `range` で取得した
+    /// ページのものでなければならない。
     ///
     /// # 事後条件
     /// `next_cursor()` は、取引所が次ページがあると報告したときに限り `Some`。
     /// `cursor` はパーセントエンコードして送る。
     ///
     /// # エラー
-    /// - `Contract`: `count` が `1..=100` の外。
+    /// - `Contract`: `count` が `1..=100` の外、または `cursor` が長すぎる。
     /// - `Api` の ERR-5016: 取引所がタイムアウトした。ドキュメントは 1 回
     ///   再試行し、それでも駄目なら範囲を狭めるよう求めている。
     ///
@@ -459,6 +464,19 @@ impl Client<Authenticated> {
             }
             .into());
         }
+        if let Some(cursor) = cursor
+            && cursor.len() > Self::MAX_CURSOR_BYTES
+        {
+            return Err(InvalidValue {
+                primitive: Primitive::Cursor,
+                violation: Violation::Size {
+                    min: 0,
+                    max: Self::MAX_CURSOR_BYTES,
+                    actual: cursor.len(),
+                },
+            }
+            .into());
+        }
         let mut call = Call::new(endpoint!(GET "/v1/account/exchangeFee/history"))
             .query("fromDate", range.from());
         if let Some(to) = range.to() {
@@ -474,8 +492,9 @@ impl Client<Authenticated> {
     /// `POST /private/v1/account/transfer`。取引所は 3 分に 1 回しか受け付けない。
     ///
     /// # 事前条件
-    /// [`Amount`] が保証する (負でない)。3 分の間隔は取引所が強制する。
-    /// このクレートは絞らない。
+    /// `amount` はゼロでない (そうでなければ `Contract(InvalidValue)`、何も
+    /// 送られない)。負でないことは [`Amount`] が保証する。3 分の間隔は
+    /// 取引所が強制する。このクレートは絞らない。
     ///
     /// # 事後条件
     /// `data` がちょうど 1 件を持ち (そうでなければ
@@ -483,7 +502,12 @@ impl Client<Authenticated> {
     /// を返す。
     ///
     /// # エラー
-    /// [REST 共通の集合](crate::rest#エラー)。振替可能額を超えると ERR-754。
+    /// `Contract`: `amount` がゼロ。ほかは [REST 共通の集合](crate::rest#エラー)。
+    /// 振替可能額を超えると ERR-754。
+    /// この操作には `client_order_id` のような冪等キーがない。`outcome_unknown()`
+    /// のとき再送すると二度振り替わり得るので、再送しない。先に `margin()` の
+    /// `transferable_amount` か履歴系のエンドポイントで残高を照合する。
+    /// `accepted_but_unreadable()` なら振替は済んでいて、額だけが読めなかった。
     ///
     /// # 例
     /// ```no_run
@@ -505,12 +529,19 @@ impl Client<Authenticated> {
         struct Entry {
             transferred_amount: Amount,
         }
+        if amount.get().is_zero() {
+            return Err(InvalidValue {
+                primitive: Primitive::Amount,
+                violation: Violation::Semantics("zero"),
+            }
+            .into());
+        }
         let call = Call::new(endpoint!(POST "/v1/account/transfer")).json(&Body {
             amount,
             transfer_type: direction,
         });
         let answer = self.private(call).await?;
-        let mut entries = decode::<Vec<Entry>>(&answer)?;
+        let mut entries: Vec<Entry> = answer.data()?;
         match (entries.pop(), entries.is_empty()) {
             (Some(entry), true) => Ok(entry.transferred_amount),
             (last, _) => Err(answer.protocol(ProtocolErrorKind::Postcondition(
@@ -520,13 +551,4 @@ impl Client<Authenticated> {
             ))),
         }
     }
-}
-
-/// `Answer::data` と同じ規則で、答えを消費せずにデコードする。事後条件の
-/// エラーが答えの文脈 (操作名) を必要とするため。
-fn decode<T: serde::de::DeserializeOwned>(answer: &Answer) -> Result<T> {
-    let Some(raw) = answer.raw() else {
-        return Err(answer.protocol(ProtocolErrorKind::MissingData));
-    };
-    serde_json::from_str(raw).map_err(|e| answer.shape_error(&e))
 }

@@ -21,7 +21,7 @@ use super::envelope::{WireMessage, message};
 use super::order::{
     BulkCancel, BulkClose, ClosePosition, ExecutionLookup, NewOrder, OrderLookup, require_leverage,
 };
-use super::{Answer, Call, Page, PageRequest, endpoint};
+use super::{Answer, Call, Page, PageRequest, WireListing, endpoint};
 use crate::client::{Authenticated, Client};
 use crate::domain::{
     Batch, CancelType, ClientOrderId, Decimal, ExecutionId, ExecutionType, OrderId, OrderPrice,
@@ -146,7 +146,9 @@ impl CancelOrdersOutcome {
     ) -> core::result::Result<Self, ProtocolErrorKind> {
         let mut failed = Vec::with_capacity(wire.failed.len());
         for f in &wire.failed {
-            let message = message(&f.message).ok_or(ProtocolErrorKind::MalformedErrorEnvelope)?;
+            let message = message(&f.message).ok_or(ProtocolErrorKind::Postcondition(
+                Postcondition::CancelRejectionMalformed(f.order_id),
+            ))?;
             failed.push(CancelRejection {
                 order_id: f.order_id,
                 message,
@@ -155,6 +157,26 @@ impl CancelOrdersOutcome {
         check_cancel_outcome(sent.as_slice(), wire.success, failed)
             .map_err(ProtocolErrorKind::Postcondition)
     }
+}
+
+/// `cancelBulkOrder` が返した id の事後条件を検査する純粋関数。
+///
+/// # 事後条件
+/// `Ok` なら、id は 10 件以下で、どれも二度現れない。
+///
+/// # エラー
+/// - `BulkCancelTooManyIds`: 11 件以上ある。
+/// - `BulkCancelIdRepeated`: 同じ id が二度ある。
+fn check_bulk_cancel_ids(ids: &[OrderId]) -> core::result::Result<(), Postcondition> {
+    if ids.len() > 10 {
+        return Err(Postcondition::BulkCancelTooManyIds { actual: ids.len() });
+    }
+    for (i, id) in ids.iter().enumerate() {
+        if ids[..i].contains(id) {
+            return Err(Postcondition::BulkCancelIdRepeated(*id));
+        }
+    }
+    Ok(())
 }
 
 /// `cancelOrders` の事後条件を、送った id に照らして検査する純粋関数。
@@ -225,11 +247,26 @@ struct WireFailure<'a> {
 
 /// ページ番号を持たない `{"list": [...]}` の形 (`orders`、`executions`、
 /// `positionSummary`)。`Page` と同じく、空の結果の `{}` も受け付ける。
-/// 公式ドキュメントにない形で、本番で確かめる必要がある (SYNTHESIS の未解決事項)。
-#[derive(Deserialize)]
+/// 公式ドキュメントにない形で、本番で確かめる必要がある (未解決)。
 struct List<T> {
-    #[serde(default = "Vec::new")]
     list: Vec<T>,
+}
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for List<T> {
+    /// `list` があればそれで、他のキーは無視する。`{}` は空のリスト。
+    /// `list` を欠いて他のキーを持つオブジェクトは形の誤り。
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> core::result::Result<Self, D::Error> {
+        let wire = WireListing::<T>::deserialize(d)?;
+        match wire.list {
+            Some(list) => Ok(List { list }),
+            None if wire.pagination.is_none() && wire.other_keys == 0 => {
+                Ok(List { list: Vec::new() })
+            }
+            None => Err(serde::de::Error::custom(
+                "expected a list or an empty object",
+            )),
+        }
+    }
 }
 
 impl Client<Authenticated> {
@@ -314,8 +351,10 @@ impl Client<Authenticated> {
     /// 1 件から 10 件。
     ///
     /// # 事後条件
-    /// 送られたままの約定。応答の約定が検索条件に一致するかは検査しない
-    /// (`Postcondition` に該当する variant がない)。
+    /// 返された約定はどれも検索条件に一致する。注文 id の検索なら `orderId`、
+    /// クライアント注文 id の検索なら `clientOrderId` (応答に無ければ不一致)、
+    /// 約定 id の検索なら `executionId` が要求のどれかと等しい。そうでなければ
+    /// `Protocol(Postcondition(ExecutionNotRequested))`。
     ///
     /// # エラー
     /// [REST 共通の集合](crate::rest#エラー)。
@@ -332,7 +371,19 @@ impl Client<Authenticated> {
     pub async fn executions(&self, lookup: &ExecutionLookup) -> Result<Vec<Execution>> {
         let (key, value) = lookup.query();
         let call = Call::new(endpoint!(GET "/v1/executions")).query(key, value);
-        decode_list(&self.private(call).await?)
+        let answer = self.private(call).await?;
+        let executions: Vec<Execution> = decode_list(&answer)?;
+        let requested = |e: &Execution| match lookup {
+            ExecutionLookup::ByOrderId(id) => e.order_id == *id,
+            ExecutionLookup::ByExecutionIds(ids) => ids.contains(&e.execution_id),
+            ExecutionLookup::ByClientOrderId(id) => e.client_order_id.as_ref() == Some(id),
+        };
+        match executions.iter().find(|e| !requested(e)) {
+            Some(stray) => Err(answer.protocol(ProtocolErrorKind::Postcondition(
+                Postcondition::ExecutionNotRequested(stray.execution_id),
+            ))),
+            None => Ok(executions),
+        }
     }
 
     /// `GET /private/v1/latestExecutions?symbol=&page=&count=`: 直近 1 日。
@@ -445,14 +496,19 @@ impl Client<Authenticated> {
     /// - `Contract(..)`: 事前条件の違反。何も送られていない。
     /// - `Api` の ERR-915: `client_order_id` が使用済み。注文は存在するので、
     ///   `OrderLookup::ByClientOrderIds` で調べる。
-    /// - `Transport` で `outcome_unknown() == true`: 同じ `NewOrder`
-    ///   (同じ `client_order_id`) を再送する。発注されるのは高々一度である。
+    /// - `outcome_unknown() == true` (`Transport` の `MaybeSent`、または答えを
+    ///   読めなかった `Protocol`): 同じ `NewOrder` (同じ `client_order_id`) を
+    ///   再送する。発注されるのは高々一度で、最初の試行が発注されていれば
+    ///   再送は ERR-915 で拒否される。`accepted_but_unreadable()` も真なら
+    ///   発注は確定しているので、再送せずに照会してよい。
     ///
     /// # 例
+    /// 結果不明なら同じ注文を再送し、ERR-915 なら顧客注文 ID で照会する。
     /// ```no_run
-    /// # async fn run(client: gmo_coin_api_client::Client<gmo_coin_api_client::Authenticated>) -> gmo_coin_api_client::Result<()> {
-    /// use gmo_coin_api_client::{ClientOrderId, LimitTimeInForce, OrderPrice, OrderSize, Side, Symbol};
-    /// use gmo_coin_api_client::rest::{NewOrder, OrderExecution};
+    /// # async fn run(client: gmo_coin_api_client::Client<gmo_coin_api_client::Authenticated>) -> Result<(), Box<dyn std::error::Error>> {
+    /// use gmo_coin_api_client::error::ErrorCode;
+    /// use gmo_coin_api_client::rest::{NewOrder, OrderExecution, OrderLookup};
+    /// use gmo_coin_api_client::{Batch, ClientOrderId, Error, LimitTimeInForce, OrderPrice, OrderSize, Side, Symbol};
     /// let order = NewOrder {
     ///     client_order_id: ClientOrderId::generate(),
     ///     symbol: Symbol::BTC,
@@ -465,8 +521,17 @@ impl Client<Authenticated> {
     ///     },
     /// };
     /// let id = match client.place_order(&order).await {
-    ///     Err(e) if e.outcome_unknown() => client.place_order(&order).await?,
-    ///     other => other?,
+    ///     Ok(id) => id,
+    ///     Err(e) if e.outcome_unknown() => match client.place_order(&order).await {
+    ///         Ok(id) => id,
+    ///         Err(Error::Api(api)) if api.has(ErrorCode::CLIENT_ORDER_ID_USED) => {
+    ///             let lookup = OrderLookup::ByClientOrderIds(Batch::one(order.client_order_id.clone()));
+    ///             let orders = client.orders(&lookup).await?;
+    ///             orders.first().ok_or("ERR-915 なのに注文が照会できない")?.order_id
+    ///         }
+    ///         Err(e) => return Err(e.into()),
+    ///     },
+    ///     Err(e) => return Err(e.into()),
     /// };
     /// println!("{id}");
     /// # Ok(()) }
@@ -530,6 +595,8 @@ impl Client<Authenticated> {
     ///
     /// # エラー
     /// [REST 共通の集合](crate::rest#エラー)。注文がもう取り消せないとき ERR-5122。
+    /// `outcome_unknown()` なら取消は受け付けられたかもしれない。同じ id で
+    /// 再送してよい。取消済みの注文には ERR-5122 が返るだけで害はない。
     ///
     /// # 例
     /// ```no_run
@@ -559,7 +626,10 @@ impl Client<Authenticated> {
     /// 送ったのに結果に現れなかった id は `unaccounted()` に入る。
     ///
     /// # エラー
-    /// [REST 共通の集合](crate::rest#エラー)。
+    /// [REST 共通の集合](crate::rest#エラー)。`outcome_unknown()` なら、どの id が
+    /// 取り消されたかは分からない。同じバッチを再送するか、`orders` で調べる。
+    /// 事後条件違反 (`accepted_but_unreadable()`) は取引所が取消を処理した後
+    /// なので、`orders` で調べる。
     ///
     /// # 例
     /// ```no_run
@@ -583,11 +653,7 @@ impl Client<Authenticated> {
             order_ids: order_ids.as_slice(),
         });
         let answer = self.private(call).await?;
-        let Some(raw) = answer.raw() else {
-            return Err(answer.protocol(ProtocolErrorKind::MissingData));
-        };
-        let wire: WireCancelOrders<'_> =
-            serde_json::from_str(raw).map_err(|e| answer.shape_error(&e))?;
+        let wire: WireCancelOrders<'_> = answer.data()?;
         CancelOrdersOutcome::from_wire(order_ids, wire).map_err(|kind| answer.protocol(kind))
     }
 
@@ -597,12 +663,14 @@ impl Client<Authenticated> {
     /// `filter.symbols` は空でない (そうでなければ `Contract(InvalidValue)`)。
     ///
     /// # 事後条件
-    /// 送られたままの id。ドキュメントは最大 10 件とするが、それは検査しない
-    /// (`Postcondition` に該当する variant がない)。
+    /// 取引所は 1 回に最大 10 件を取り消すので、返る id は 10 件以下で重複しない。
+    /// 11 件以上なら `Protocol(Postcondition(BulkCancelTooManyIds))`、同じ id が
+    /// 二度あれば `Protocol(Postcondition(BulkCancelIdRepeated))`。
     ///
     /// # エラー
     /// `Contract`: `symbols` が空。リクエストは作られない。ほかは
-    /// [REST 共通の集合](crate::rest#エラー)。
+    /// [REST 共通の集合](crate::rest#エラー)。`outcome_unknown()` なら、取り消された
+    /// id は分からない。`active_orders` で残りを調べてから再送する。
     ///
     /// # 例
     /// ```no_run
@@ -617,7 +685,11 @@ impl Client<Authenticated> {
     pub async fn cancel_bulk_orders(&self, filter: &BulkCancel) -> Result<Vec<OrderId>> {
         filter.check()?;
         let call = Call::new(endpoint!(POST "/v1/cancelBulkOrder")).json(&filter.wire());
-        self.private(call).await?.data()
+        let answer = self.private(call).await?;
+        let ids: Vec<OrderId> = answer.data()?;
+        check_bulk_cancel_ids(&ids)
+            .map_err(|p| answer.protocol(ProtocolErrorKind::Postcondition(p)))?;
+        Ok(ids)
     }
 
     /// `POST /private/v1/closeOrder`。
@@ -633,6 +705,8 @@ impl Client<Authenticated> {
     /// `Contract`: 現物銘柄。リクエストは作られない。ほかは
     /// [REST 共通の集合](crate::rest#エラー)。決済する側が違うとき ERR-70、
     /// 建玉が存在しないとき ERR-254、`client_order_id` の再利用で ERR-915。
+    /// `outcome_unknown()` のときは `place_order` と同じ手順: 同じ
+    /// `client_order_id` で再送し、ERR-915 なら `orders` で照会する。
     ///
     /// # 例
     /// ```no_run
@@ -667,7 +741,9 @@ impl Client<Authenticated> {
     ///
     /// # エラー
     /// `Contract`: 現物銘柄。リクエストは作られない。ほかは
-    /// [REST 共通の集合](crate::rest#エラー)。
+    /// [REST 共通の集合](crate::rest#エラー)。`outcome_unknown()` のときは
+    /// `place_order` と同じ手順: 同じ `client_order_id` で再送し、ERR-915 なら
+    /// `orders` で照会する。
     ///
     /// # 例
     /// ```no_run
@@ -727,15 +803,9 @@ impl Client<Authenticated> {
     }
 }
 
-/// `Answer` を消費せずに `{"list": [...]}` をデコードする。事後条件のエラーが
-/// 答えの文脈を必要とするため。
+/// `{"list": [...]}` の `list`。
 fn decode_list<T: serde::de::DeserializeOwned>(answer: &Answer) -> Result<Vec<T>> {
-    let Some(raw) = answer.raw() else {
-        return Err(answer.protocol(ProtocolErrorKind::MissingData));
-    };
-    serde_json::from_str::<List<T>>(raw)
-        .map(|l| l.list)
-        .map_err(|e| answer.shape_error(&e))
+    answer.data::<List<T>>().map(|l| l.list)
 }
 
 #[cfg(test)]
@@ -831,6 +901,17 @@ mod tests {
         assert_eq!(full.list, [1, 2]);
         let empty: List<u32> = serde_json::from_str("{}").unwrap();
         assert!(empty.list.is_empty());
+        let extra: List<u32> = serde_json::from_str(r#"{"list":[3],"extra":1}"#).unwrap();
+        assert_eq!(extra.list, [3], "unknown keys next to a list are ignored");
         assert!(serde_json::from_str::<List<u32>>("[1]").is_err());
+        assert!(
+            serde_json::from_str::<List<u32>>(r#"{"items":[1]}"#).is_err(),
+            "a renamed list is a shape error, not an empty list"
+        );
+        assert!(serde_json::from_str::<List<u32>>(r#"{"foo":1}"#).is_err());
+        assert!(
+            serde_json::from_str::<List<u32>>(r#"{"pagination":{"currentPage":1,"count":1}}"#)
+                .is_err()
+        );
     }
 }

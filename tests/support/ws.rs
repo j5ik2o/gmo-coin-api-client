@@ -18,6 +18,8 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
+use tokio_tungstenite::tungstenite::protocol::CloseFrame;
+use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 
 use super::State;
 
@@ -28,10 +30,19 @@ pub struct Hub {
     pub commands: Vec<(Instant, Api, u64, Value)>,
     conns: Vec<Conn>,
     pub pongs: usize,
+    /// クライアントから受け取った close フレームの数 (自発的なものも、
+    /// こちらの close への返答も)。
+    pub closes_received: usize,
     /// 完了したハンドシェイクの数 (API ごと)。
     pub handshakes: Vec<(u64, Api)>,
     next_id: u64,
     maintenance: bool,
+    /// `(api, channel, error text)`。一致する subscribe は記録した上で
+    /// `{"error": text}` で答える。
+    rejections: Vec<(Api, String, String)>,
+    /// `Some(status)` の間、Private のハンドシェイクをトークンに関係なく
+    /// その HTTP 状態で拒否する。
+    reject_private: Option<u16>,
 }
 
 struct Conn {
@@ -43,6 +54,8 @@ struct Conn {
 enum Outgoing {
     Text(String),
     Ping,
+    /// 正常終了 (1000) の close フレームを送り、返答を待ってから閉じる。
+    Close,
     Drop,
 }
 
@@ -122,6 +135,19 @@ impl WsControl {
         }
     }
 
+    /// `api` の開いているすべての接続に正常終了 (1000) の close フレームを
+    /// 送る。クライアントの返答は `closes_received` に数えられる。
+    pub fn close_connections(&self, api: Api) {
+        for conn in self.lock().ws.conns.iter().filter(|c| c.api == api) {
+            let _ = conn.tx.send(Outgoing::Close);
+        }
+    }
+
+    /// クライアントから受け取った close フレームの数。
+    pub fn closes_received(&self) -> usize {
+        self.lock().ws.closes_received
+    }
+
     /// ping を送り、`within` 以内に pong が返ったかを返す。
     pub async fn ping(&self, api: Api, within: Duration) -> bool {
         let before = {
@@ -174,6 +200,21 @@ impl WsControl {
     pub fn set_maintenance(&self, on: bool) {
         self.lock().ws.maintenance = on;
     }
+
+    /// 以後、`api` で `channel` への subscribe が届くたびに、記録した上で
+    /// `{"error": text}` を返す。本番で観測した拒否の形と同じ。
+    pub fn reject_subscribe(&self, api: Api, channel: &str, text: &str) {
+        self.lock()
+            .ws
+            .rejections
+            .push((api, channel.to_owned(), text.to_owned()));
+    }
+
+    /// `Some(status)` の間、Private のハンドシェイクをトークンの生死に
+    /// 関係なくその HTTP 状態で拒否する。`None` で元に戻す。
+    pub fn reject_private_handshakes(&self, status: Option<u16>) {
+        self.lock().ws.reject_private = status;
+    }
 }
 
 /// アップグレード要求を 1 本処理する。
@@ -196,7 +237,9 @@ pub async fn serve(socket: TcpStream, state: Arc<Mutex<State>>) {
             api = Some(Api::Public);
             Ok(resp)
         } else if let Some(token) = path.strip_prefix("/ws/private/v1/") {
-            if st.tokens.is_live(token) {
+            if let Some(status) = st.ws.reject_private {
+                reject(status)
+            } else if st.tokens.is_live(token) {
                 api = Some(Api::Private);
                 Ok(resp)
             } else {
@@ -224,12 +267,25 @@ pub async fn serve(socket: TcpStream, state: Arc<Mutex<State>>) {
             inbound = ws.next() => match inbound {
                 Some(Ok(Message::Text(text))) => {
                     if let Ok(value) = serde_json::from_str::<Value>(&text) {
-                        state.lock().unwrap_or_else(|e| e.into_inner()).ws.commands.push((Instant::now(), api, id, value));
+                        let rejection = {
+                            let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
+                            let rejection = st.ws.rejections.iter().find(|(a, channel, _)| {
+                                *a == api && value["command"] == "subscribe" && value["channel"] == channel.as_str()
+                            }).map(|(_, _, text)| serde_json::json!({"error": text}).to_string());
+                            st.ws.commands.push((Instant::now(), api, id, value));
+                            rejection
+                        };
+                        if let Some(reply) = rejection && ws.send(Message::text(reply)).await.is_err() {
+                            break;
+                        }
                     }
                 }
                 Some(Ok(Message::Pong(_))) => state.lock().unwrap_or_else(|e| e.into_inner()).ws.pongs += 1,
                 Some(Ok(Message::Close(_))) => {
-                    let _ = ws.close(None).await;
+                    state.lock().unwrap_or_else(|e| e.into_inner()).ws.closes_received += 1;
+                    // tungstenite は受信した close への返答を積むだけなので、
+                    // 捨てる前に flush して返答を書き出す (RFC 6455 のエコー)。
+                    let _ = ws.flush().await;
                     break;
                 }
                 Some(Ok(_)) => {}
@@ -243,6 +299,15 @@ pub async fn serve(socket: TcpStream, state: Arc<Mutex<State>>) {
                 }
                 Some(Outgoing::Ping) => {
                     if ws.send(Message::Ping(Vec::new().into())).await.is_err() {
+                        break;
+                    }
+                }
+                Some(Outgoing::Close) => {
+                    let frame = CloseFrame {
+                        code: CloseCode::Normal,
+                        reason: "".into(),
+                    };
+                    if ws.send(Message::Close(Some(frame))).await.is_err() {
                         break;
                     }
                 }

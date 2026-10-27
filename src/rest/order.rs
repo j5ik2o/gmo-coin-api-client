@@ -117,8 +117,12 @@ impl WireExecution {
         cancel_before: None,
     };
 
-    /// 取引所の MARKET の既定は FAK で、`cancelBefore` が要求するものと同じ。
-    /// だから `timeInForce` は付けない。
+    /// `timeInForce` は付けない。ドキュメントの `timeInForce` 欄
+    /// (「FAK FAS FOK ((Post-onlyの場合はSOK) LIMITの場合のみ設定可能)」) は、
+    /// 全体が LIMIT 専用とも SOK だけが LIMIT 専用とも読める。省略すれば
+    /// MARKET の既定の FAK で執行され、`cancelBefore` の条件 (MARKET、FAK、
+    /// SELL) をどちらの読み方でも満たす。明示すると、前者の読み方では
+    /// ERR-5111 で拒否されうる。
     const MARKET_CANCEL_BEFORE: WireExecution = WireExecution {
         execution_type: "MARKET",
         time_in_force: None,
@@ -515,6 +519,19 @@ mod tests {
         assert_eq!(
             body(&o.wire()),
             json!({"symbol":"BTC","side":"SELL","executionType":"MARKET","cancelBefore":true,"size":"0.02","clientOrderId":"abc123"})
+        );
+        let c = ClosePosition {
+            client_order_id: ClientOrderId::parse("c1").unwrap(),
+            symbol: Symbol::BTC_JPY,
+            side: Side::Sell,
+            position_id: PositionId::new(1234567).unwrap(),
+            size: OrderSize::parse("0.1").unwrap(),
+            execution: CloseExecution::MarketCancelBefore,
+        };
+        assert_eq!(
+            body(&c.wire()),
+            json!({"symbol":"BTC_JPY","side":"SELL","executionType":"MARKET","cancelBefore":true,
+                   "settlePosition":[{"positionId":1234567,"size":"0.1"}],"clientOrderId":"c1"})
         );
     }
 

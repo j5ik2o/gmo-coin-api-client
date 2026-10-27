@@ -1,5 +1,10 @@
-//! WebSocket message payloads. The public ticker reuses `rest::Ticker`
-//! (identical fields); the others differ from their REST cousins.
+//! WebSocket メッセージのペイロード。Public の ticker は `rest::Ticker` を
+//! そのまま使う (フィールドが同一)。それ以外は REST の対応物と形が違う。
+//!
+//! どの型もデコードはフェイルクローズドである: 文書化されたフィールドが
+//! 欠けるか形が違えば、フィードは `Protocol(WsMessage)` で終わる。開いた
+//! 列挙 (`OrderStatus`、`CancelType`、各 `MsgType`) は未知の値を
+//! `Unknown(UnknownValue)` として保持する。
 
 use serde::Deserialize;
 
@@ -10,8 +15,8 @@ use crate::domain::{
 };
 use crate::rest::OrderBookLevel;
 
-/// `orderbooks`: a full snapshot each time, so a reconnect needs no repair
-/// beyond waiting for the next one.
+/// `orderbooks`: 毎回完全なスナップショット。再接続の後は次のスナップショットを
+/// 待つ以外の修復は要らない。
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct OrderBookUpdate {
     pub symbol: Symbol,
@@ -20,7 +25,7 @@ pub struct OrderBookUpdate {
     pub timestamp: Timestamp,
 }
 
-/// `trades`.
+/// `trades`。
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct TradeEvent {
     pub symbol: Symbol,
@@ -30,7 +35,7 @@ pub struct TradeEvent {
     pub timestamp: Timestamp,
 }
 
-/// `executionEvents`.
+/// `executionEvents`。
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExecutionEvent {
@@ -48,7 +53,7 @@ pub struct ExecutionEvent {
     pub execution_timestamp: Timestamp,
     pub loss_gain: Decimal,
     pub fee: Decimal,
-    /// Absent for MARKET orders.
+    /// MARKET 注文では欠ける。
     pub order_price: Option<Price>,
     pub order_size: Size,
     pub order_executed_size: Size,
@@ -56,7 +61,7 @@ pub struct ExecutionEvent {
     pub msg_type: ExecutionMsgType,
 }
 
-/// `orderEvents`.
+/// `orderEvents`。
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OrderEvent {
@@ -67,7 +72,7 @@ pub struct OrderEvent {
     pub execution_type: ExecutionType,
     pub side: Side,
     pub order_status: OrderStatus,
-    /// For CANCELED/EXPIRED, and `SOK_TAKER`/`PRICE_LIMIT` for ORDERED.
+    /// CANCELED と EXPIRED のとき。ORDERED では `SOK_TAKER` と `PRICE_LIMIT`。
     pub cancel_type: Option<CancelType>,
     pub order_timestamp: Timestamp,
     pub order_price: Option<Price>,
@@ -78,7 +83,7 @@ pub struct OrderEvent {
     pub msg_type: OrderMsgType,
 }
 
-/// `positionEvents`.
+/// `positionEvents`。
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PositionEvent {
@@ -86,6 +91,7 @@ pub struct PositionEvent {
     pub symbol: Symbol,
     pub side: Side,
     pub size: Size,
+    /// 取引所の綴りは `orderdSize` (原文のまま)。
     #[serde(rename = "orderdSize")]
     pub ordered_size: Size,
     pub price: Price,
@@ -96,7 +102,7 @@ pub struct PositionEvent {
     pub msg_type: PositionMsgType,
 }
 
-/// `positionSummaryEvents`.
+/// `positionSummaryEvents`。
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PositionSummaryEvent {

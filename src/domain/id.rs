@@ -275,7 +275,6 @@ impl<T: Eq, const MAX: usize> Batch<T, MAX> {
                 },
             });
         }
-        // MAX はどの用途でも高々 10 なので、二次の走査のほうがハッシュより安い。
         for (i, a) in items.iter().enumerate() {
             if items[i + 1..].contains(a) {
                 return Err(InvalidValue {
