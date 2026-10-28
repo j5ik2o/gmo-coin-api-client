@@ -1064,24 +1064,27 @@ async fn a_prompt_rejection_read_after_the_caller_was_away_is_attributed_to_it()
     );
 }
 
-/// 予算を 1 単位だけ残して使い切り、同じポーリングで `next` を読む。
+/// `next` を 1 回だけポーリングする。そのポーリングでは、予算を 1 単位だけ
+/// 残して使い切る。`next` が `Pending` を返したら `None`。
 ///
 /// tokio は 1 回のタスクのポーリングに使える作業量 (協調スケジューリングの
 /// 予算) を与え、使い切ると予算を使う操作に `Pending` を返す。ソケットの
 /// 読み込みは 1 回に 1 単位を使うので、1 単位だけ残すと、読み込みは 1 回だけ
 /// 進み、フレームが途中なら 2 回目で予算の壁に当たる。呼び出し側が別の
 /// tokio の資源で予算を使った後に `next` を読む、という普通の使い方で起きる。
-async fn next_with_one_budget_unit_left<C: gmo_coin_api_client::ws::FeedChannel>(
+///
+/// 予算の大きさは数えない。最後の 1 単位だけ `made_progress` を呼ばずに
+/// 捨てると、`RestoreOnPending` がその呼び出しの前の値に戻すので、ちょうど
+/// 1 単位が残る。
+async fn poll_next_once_with_one_budget_unit_left<C: gmo_coin_api_client::ws::FeedChannel>(
     feed: &mut gmo_coin_api_client::ws::Feed<C>,
-) -> gmo_coin_api_client::Result<C::Event> {
+) -> Option<gmo_coin_api_client::Result<C::Event>> {
     let mut next = std::pin::pin!(feed.next());
+    let mut outcome = None;
     let mut first = true;
     std::future::poll_fn(|cx| {
         if first {
             first = false;
-            // 最後の 1 単位だけは `made_progress` を呼ばずに捨てる。
-            // `RestoreOnPending` は落とすとその呼び出しの前の予算に戻すので、
-            // ちょうど 1 単位が残る。予算の大きさは数えない。
             let mut held = None;
             while let std::task::Poll::Ready(progress) = tokio::task::coop::poll_proceed(cx) {
                 if let Some(previous) = held.replace(progress) {
@@ -1089,9 +1092,16 @@ async fn next_with_one_budget_unit_left<C: gmo_coin_api_client::ws::FeedChannel>
                 }
             }
         }
-        next.as_mut().poll(cx)
+        match next.as_mut().poll(cx) {
+            std::task::Poll::Ready(event) => {
+                outcome = Some(event);
+                std::task::Poll::Ready(())
+            }
+            std::task::Poll::Pending => std::task::Poll::Ready(()),
+        }
     })
-    .await
+    .await;
+    outcome
 }
 
 /// 予算切れの `Pending` は空のソケットではない。受信が途切れない接続で、
@@ -1099,16 +1109,23 @@ async fn next_with_one_budget_unit_left<C: gmo_coin_api_client::ws::FeedChannel>
 /// 拒否には購読したチャネルが付く (#16)。
 ///
 /// 場面: 購読していない銘柄の大きなフレーム (1 回の読み込みに収まらない) の
-/// すぐ後ろに拒否を積み、窓の期限 (1.05 秒) を過ぎてから、予算を 1 単位残して
-/// `next` を読む。修正前は、フレームの途中の読み込みが予算切れで `Pending` を
-/// 返したところで窓が閉じ、拒否は `channel: None` になる。
+/// すぐ後ろに拒否を積み、窓の期限 (1.05 秒) を過ぎてから読む。読み込みは
+/// 予算を使い切ったところで `Pending` を返すので、フレームの途中で止まった
+/// 1 回目のポーリングでは、窓を閉じてはいけない。修正前はここで窓が閉じ、
+/// 拒否は `channel: None` になる。
+///
+/// ポーリングは予算を 1 単位だけ残すので、1 回に 1 チャンク (128 KiB) しか
+/// 読まない。そのため、モックが次のチャンクを書き終えるのを待ってから
+/// ポーリングする。モックはこのテストと同じランタイムのタスクなので、
+/// 待たずにポーリングすると、空のソケットを見て窓が正当に閉じてしまう。
+/// 本番の取引所は別プロセスなので、この待ちはテストの都合である。
 #[tokio::test]
 async fn a_read_stopped_by_the_cooperative_budget_does_not_close_the_rejection_window() {
     /// フレームの大きさ。tungstenite はソケットから `read_buffer_size`
     /// (既定 128 KiB) ずつ読むので、これなら 1 回の読み込みに収まらず、
     /// 途中で止まった場面を作れる。これは必須である: 1 回で読み切れる
-    /// フレームだと、次の読み込みは予算切れの前に `select!` の入口で止まり、
-    /// 予算切れの `Pending` が起きない。
+    /// フレームだと、読み込みは予算の壁に当たらず、予算切れの `Pending` が
+    /// 起きない。
     const FRAME: usize = 300_000;
 
     let mock = MockExchange::start().await;
@@ -1130,7 +1147,15 @@ async fn a_read_stopped_by_the_cooperative_budget_does_not_close_the_rejection_w
     ws.push(Api::Public, &fixture("live/ws_public_error.json"));
     tokio::time::sleep(Duration::from_millis(1300)).await;
 
-    match next_with_one_budget_unit_left(&mut feed).await.unwrap() {
+    let deadline = Instant::now() + WAIT;
+    let event = loop {
+        assert!(Instant::now() < deadline, "the rejection never arrived");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        if let Some(event) = poll_next_once_with_one_budget_unit_left(&mut feed).await {
+            break event;
+        }
+    };
+    match event.unwrap() {
         PublicEvent::Rejected { channel, text } => {
             assert_eq!(channel, Some(PublicChannel::Ticker(Symbol::ETH)));
             assert_eq!(&*text, "ERR-5106 Invalid request parameter. channel");
