@@ -40,9 +40,9 @@ use crate::error::{Postcondition, ProtocolErrorKind, Result};
 pub struct Margin {
     /// 時価評価総額。
     pub actual_profit_loss: Decimal,
-    /// 取引余力（代用暗号資産評価額を含む、レバレッジ取引用）。
+    /// 取引余力 (代用暗号資産評価額を含む、レバレッジ取引用)。
     pub available_amount: Decimal,
-    /// 現物購入余力（代用暗号資産評価額を含まない）。
+    /// 現物購入余力 (代用暗号資産評価額を含まない)。
     pub available_amount_for_spot: Decimal,
     /// 代用暗号資産不足金ステータス。
     pub crypto_shortfall_status: CryptoShortfallStatus,
@@ -66,7 +66,7 @@ pub struct Asset {
     pub symbol: Symbol,
     /// 残高。
     pub amount: Amount,
-    /// 利用可能金額（残高 - 出金予定額）。
+    /// 利用可能金額 (残高 - 出金予定額)。
     pub available: Amount,
     /// 円転レート。販売所での売却価格。販売所で取り扱いのない銘柄は、取引所現物での最終約定価格。
     pub conversion_rate: Price,
@@ -76,7 +76,7 @@ pub struct Asset {
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TradingVolume {
-    /// 今週の取引高(日本円)。
+    /// 今週の取引高 (日本円)。
     pub jpy_volume: Amount,
     /// 1、2、3 のいずれか。送られたままで、階層の表は取引所のもの。
     pub tier_level: u8,
@@ -165,7 +165,7 @@ pub struct FiatTransfer {
     pub status: TransferStatus,
     /// 銘柄。日本円の入出金なので `JPY`。
     pub symbol: Symbol,
-    /// 完了時刻（UTC 時刻）。
+    /// 完了時刻 (UTC 時刻)。
     pub timestamp: Timestamp,
 }
 
@@ -183,7 +183,7 @@ pub struct CryptoTransfer {
     pub status: TransferStatus,
     /// 取扱銘柄。
     pub symbol: Symbol,
-    /// 完了時刻（UTC 時刻）。
+    /// 完了時刻 (UTC 時刻)。
     pub timestamp: Timestamp,
     /// トランザクションハッシュ。
     pub tx_hash: Box<str>,
@@ -226,9 +226,9 @@ pub struct ExchangeFee {
     pub symbol: Symbol,
     /// 手数料種別。
     pub fee_type: FeeType,
-    /// 対象営業日（YYYYMMDD）。
+    /// 対象営業日 (YYYYMMDD)。
     pub delivery_date: BusinessDate,
-    /// 計上日時（UTC 時刻）。
+    /// 計上日時 (UTC 時刻)。
     pub delivery_datetime: Timestamp,
     /// 日本円。返金は正、徴収は負。
     pub delivery_amount: Decimal,

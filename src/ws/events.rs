@@ -21,9 +21,9 @@ use crate::rest::OrderBookLevel;
 pub struct OrderBookUpdate {
     /// 取扱銘柄。
     pub symbol: Symbol,
-    /// 売り注文の情報（最良気配から昇順）。
+    /// 売り注文の情報 (最良気配から昇順)。
     pub asks: Vec<OrderBookLevel>,
-    /// 買い注文の情報（最良気配から降順）。
+    /// 買い注文の情報 (最良気配から降順)。
     pub bids: Vec<OrderBookLevel>,
     /// 配信日時。
     pub timestamp: Timestamp,

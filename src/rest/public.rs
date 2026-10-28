@@ -16,11 +16,11 @@ pub struct Ticker {
     pub ask: Price,
     /// 現在の買注文の最良気配値。
     pub bid: Price,
-    /// 当日の最高値(最終取引価格)。
+    /// 当日の最高値 (最終取引価格)。
     pub high: Price,
     /// 最終取引価格。
     pub last: Price,
-    /// 当日の最安値(最終取引価格)。
+    /// 当日の最安値 (最終取引価格)。
     pub low: Price,
     /// 24 時間の取引量。
     pub volume: Size,
@@ -34,9 +34,9 @@ pub struct Ticker {
 pub struct OrderBook {
     /// 取扱銘柄。
     pub symbol: Symbol,
-    /// 売り注文の情報（最良気配から昇順）。
+    /// 売り注文の情報 (最良気配から昇順)。
     pub asks: Vec<OrderBookLevel>,
-    /// 買い注文の情報（最良気配から降順）。
+    /// 買い注文の情報 (最良気配から降順)。
     pub bids: Vec<OrderBookLevel>,
 }
 
@@ -66,7 +66,8 @@ pub struct Trade {
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Kline {
-    /// 開始時刻の unix タイムスタンプ(ミリ秒)。
+    /// 開始時刻。ワイヤ上の `openTime` はミリ秒単位の unix タイムスタンプの文字列で、
+    /// デコード時に [`Timestamp`] に変換する。
     #[serde(deserialize_with = "Timestamp::deserialize_millis")]
     pub open_time: Timestamp,
     /// 始値。

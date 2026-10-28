@@ -170,9 +170,9 @@ closed_enum!(
 closed_enum!(
     /// `cancelBulkOrder` の `settleType` フィルタ。
     SettleFilter {
-        /// 新規 (建玉を建てる) 注文だけを対象にする。
+        /// 現物取引の注文と、新規のレバレッジ取引の注文を取り消す。
         Open = "OPEN",
-        /// 決済注文だけを対象にする。
+        /// 現物取引の注文と、決済のレバレッジ取引の注文を取り消す。
         Close = "CLOSE",
     }
 );
@@ -202,7 +202,7 @@ open_enum!(
 open_enum!(
     /// 注文の `status`、注文イベントの `orderStatus`。
     OrderStatus {
-        /// 待機中。取引所のドキュメントでは逆指値注文で有効になる状態とされる。
+        /// 待機中。取引所のドキュメントには「逆指値注文の場合は WAITING が有効」とある。
         Waiting = "WAITING",
         /// 注文中。
         Ordered = "ORDERED",
@@ -280,11 +280,11 @@ open_enum!(
 open_enum!(
     /// 応答側の `settleType`。
     SettleType {
-        /// 新規 (建玉を建てる)。
+        /// 新規。レバレッジ取引の新規注文とその約定に加え、現物取引の注文と約定もこの値を持つ。
         Open = "OPEN",
         /// 決済。
         Close = "CLOSE",
-        /// ロスカットによる決済。注文イベントの `settleType` にだけ現れる。
+        /// ロスカットによる決済。取引所のドキュメントでは、注文イベントの `settleType` にだけ挙がっている。
         LossCut = "LOSS_CUT",
     }
 );
@@ -318,11 +318,11 @@ open_enum!(
 open_enum!(
     /// `cryptoShortfallStatus`。
     CryptoShortfallStatus {
-        /// 代用暗号資産の不足はない。
+        /// 代用暗号資産不足金は発生していない。
         Normal = "NORMAL",
-        /// 代用暗号資産が不足している。
+        /// 代用暗号資産不足金が発生している。
         Shortfall = "SHORTFALL",
-        /// 代用暗号資産の清算の状態。
+        /// 清算の状態。
         Liquidation = "LIQUIDATION",
     }
 );
@@ -338,25 +338,27 @@ open_enum!(
 open_enum!(
     /// 取引所手数料履歴の `feeType`。
     FeeType {
-        /// レバレッジ取引の手数料。
+        /// 取引所のレバレッジ手数料。
         LeverageFee = "LEVERAGE_FEE",
-        /// 現物取引の手数料の返金。
+        /// 現物取引の取引手数料の端数の返金。
         SpotFeeRefund = "SPOT_FEE_REFUND",
-        /// レバレッジ取引の手数料の返金。
+        /// レバレッジ取引の取引手数料の端数の返金。`LEVERAGE_FEE` の返金ではない。
         LeverageFeeRefund = "LEVERAGE_FEE_REFUND",
     }
 );
 
 open_enum!(
     /// `orderEvents` の `msgType`。
+    ///
+    /// 取引所のドキュメントは値を挙げるだけで、各値の意味を説明していない。
     OrderMsgType {
-        /// 新規注文 (`NOR`)。
+        /// `NOR`。
         New = "NOR",
-        /// 注文の変更 (`ROR`)。
+        /// `ROR`。
         Replaced = "ROR",
-        /// 注文の取消 (`COR`)。
+        /// `COR`。
         Canceled = "COR",
-        /// 約定 (`ER`)。
+        /// `ER`。約定情報通知 (`executionEvents`) が送る `msgType` と同じ値。
         Executed = "ER",
     }
 );
@@ -364,33 +366,37 @@ open_enum!(
 open_enum!(
     /// `executionEvents` の `msgType`。
     ExecutionMsgType {
-        /// 約定 (`ER`)。
+        /// `ER`。約定情報通知が送る唯一の値。
         Executed = "ER",
     }
 );
 
 open_enum!(
     /// `positionEvents` の `msgType`。
+    ///
+    /// 取引所のドキュメントは値を挙げるだけで、各値の意味を説明していない。
     PositionMsgType {
-        /// 建玉の発生 (`OPR`)。
+        /// `OPR`。
         Opened = "OPR",
-        /// 建玉の更新 (`UPR`)。
+        /// `UPR`。
         Updated = "UPR",
-        /// ロスカットレートの更新 (`ULR`)。
+        /// `ULR`。
         LosscutUpdated = "ULR",
-        /// 建玉の決済 (`CPR`)。
+        /// `CPR`。
         Closed = "CPR",
     }
 );
 
 open_enum!(
     /// `positionSummaryEvents` の `msgType`。
+    ///
+    /// 取引所のドキュメントは `INIT` と `UPDATE` の意味を説明していない。
     SummaryMsgType {
-        /// 初期データ (`INIT`)。
+        /// `INIT`。
         Init = "INIT",
-        /// 更新 (`UPDATE`)。
+        /// `UPDATE`。
         Update = "UPDATE",
-        /// `option` に `PERIODIC` を指定したときの定期送信 (`PERIODIC`)。
+        /// `PERIODIC`。購読の `option` に `PERIODIC` を指定したときの定期送信 (5 秒ごと)。
         Periodic = "PERIODIC",
     }
 );

@@ -62,7 +62,7 @@ pub enum Primitive {
     PositionId,
     /// 呼び出し側が付ける注文 id ([`ClientOrderId`])。
     ClientOrderId,
-    /// id のまとまり ([`Batch`])。
+    /// 件数に上限のあるリスト ([`Batch`])。`BulkCancel` の `symbols` が空のときにも使う。
     Batch,
     /// 時刻 ([`Timestamp`])。
     Timestamp,
@@ -95,13 +95,14 @@ pub enum Primitive {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Violation {
-    /// 段階 1。`max` バイトより長いか、`min` バイトより短い。
+    /// 段階 1。長さが `min..=max` の外にある。長さの単位は、[`Primitive::Batch`] では
+    /// 要素の件数、それ以外のプリミティブでは入力のバイト数である。
     Size {
-        /// 許される最小のバイト数。
+        /// 許される長さの下限。
         min: usize,
-        /// 許される最大のバイト数。
+        /// 許される長さの上限。
         max: usize,
-        /// 実際のバイト数。
+        /// 実際の長さ。
         actual: usize,
     },
     /// 段階 2。許されない バイトがこのバイトオフセットにある。

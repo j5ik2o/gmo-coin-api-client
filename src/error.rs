@@ -27,7 +27,8 @@ use crate::domain::{ExecutionId, InvalidValue, OrderId, Timestamp};
 /// このクレートの公開 API が返す `Result`。エラー型の既定値は [`Error`] である。
 pub type Result<T, E = Error> = core::result::Result<T, E>;
 
-/// このクレート唯一のエラー型。どの variant かで責任の所在が分かる (モジュールの表を参照)。
+/// このクレートのエラーをまとめる型。どの variant かで責任の所在が分かる (モジュールの表を参照)。
+/// [`InvalidValue`] や [`ContractViolation`] を直接返す API もあり、どちらも `From` でこの型に変換できる。
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {
@@ -240,7 +241,7 @@ impl ErrorCode {
     pub const WRONG_POSITION_SIDE: ErrorCode = ErrorCode(70);
     /// ERR-189。決済注文の数量が、決済可能な保有数量を超えている。
     pub const CLOSE_SIZE_OVER_POSITION: ErrorCode = ErrorCode(189);
-    /// ERR-200。すでに有効注文があり、注文数量が発注可能な数量を超えている。数量を変えるか、有効注文を取り消してから再度注文する。
+    /// ERR-200。すでに有効注文があり、注文数量が発注可能な数量を超えている。決済注文をしたい場合は、数量を変えるか、有効注文を取り消してから再度注文する。
     pub const ACTIVE_ORDERS_EXCEED_SIZE: ErrorCode = ErrorCode(200);
     /// ERR-201。注文時に取引余力が不足している。
     pub const INSUFFICIENT_BALANCE: ErrorCode = ErrorCode(201);
@@ -284,7 +285,7 @@ impl ErrorCode {
     pub const BAD_SIGNATURE: ErrorCode = ErrorCode(5010);
     /// ERR-5011。`API-KEY` ヘッダが設定されていない。
     pub const API_KEY_MISSING: ErrorCode = ErrorCode(5011);
-    /// ERR-5012。`API-KEY` が認証エラーになった。
+    /// ERR-5012。`API-KEY` が認証エラーになった場合などに返る。
     pub const API_KEY_REJECTED: ErrorCode = ErrorCode(5012);
     /// ERR-5014。同意が必要な処理で、未確認または未同意の事項がある。
     pub const CONSENT_REQUIRED: ErrorCode = ErrorCode(5014);
@@ -318,7 +319,7 @@ impl ErrorCode {
     pub const TOO_MANY_EXECUTION_IDS: ErrorCode = ErrorCode(5132);
     /// ERR-5133。振替規制中のため、口座振替ができない。
     pub const TRANSFER_RESTRICTED: ErrorCode = ErrorCode(5133);
-    /// ERR-5135。外国為替 FX 用の口座が開設されていない。
+    /// ERR-5135。外国為替 FX 用の口座が開設されていない状態で口座振替をした。
     pub const FX_ACCOUNT_MISSING: ErrorCode = ErrorCode(5135);
     /// ERR-5145。注文情報取得、約定情報取得で、指定した `clientOrderId` が上限の件数を超えている。
     pub const TOO_MANY_CLIENT_ORDER_IDS: ErrorCode = ErrorCode(5145);
@@ -386,7 +387,8 @@ impl ProtocolError {
     pub fn api(&self) -> ApiGroup {
         self.api
     }
-    /// エラーが起きた操作の名前。`"POST /v1/order"` のようにメソッドとパスから成る。
+    /// エラーが起きた操作の名前。[`api`](Self::api) が REST なら `"POST /v1/order"` のように
+    /// メソッドとパスから成り、WebSocket ならハンドシェイクのパス `"/v1"` である。
     pub fn operation(&self) -> &'static str {
         self.operation
     }
@@ -446,7 +448,7 @@ impl fmt::Display for ProtocolError {
 
 impl std::error::Error for ProtocolError {}
 
-/// [`ProtocolError`] の原因。位置は行と列だけを持ち、問題の JSON 値は持たない。
+/// [`ProtocolError`] の原因。`Shape` と `WsMessage` は位置 (行と列) だけを持ち、問題の JSON 値は持たない。
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ProtocolErrorKind {
@@ -562,7 +564,7 @@ impl fmt::Display for Postcondition {
     }
 }
 
-/// 通信の失敗。ネットワーク、TLS、サイズ上限、タイムアウトのどれか。
+/// 通信の失敗。原因の種類は [`TransportErrorKind`] が表す。
 #[derive(Debug)]
 pub struct TransportError {
     pub(crate) api: ApiGroup,
@@ -576,7 +578,8 @@ impl TransportError {
     pub fn api(&self) -> ApiGroup {
         self.api
     }
-    /// 失敗した操作の名前。`"POST /v1/order"` のようにメソッドとパスから成る。
+    /// 失敗した操作の名前。[`api`](Self::api) が REST なら `"POST /v1/order"` のように
+    /// メソッドとパスから成り、WebSocket ならハンドシェイクのパス `"/v1"` である。
     pub fn operation(&self) -> &'static str {
         self.operation
     }
@@ -661,7 +664,7 @@ pub enum Phase {
     WsHandshake,
     /// WebSocket の書き込み。
     WsWrite,
-    /// WebSocket のアイドル (待機) 中。
+    /// WebSocket のアイドル (受信がない状態)。
     WsIdle,
 }
 
