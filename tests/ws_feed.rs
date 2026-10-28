@@ -1036,8 +1036,7 @@ async fn a_rejection_after_the_window_names_no_channel_and_drops_nothing() {
 /// 窓の中に届いたかもしれないので、その subscribe に帰属する。拒否された
 /// subscribe は集合から外れ、再接続でも送り直さない (issue #6)。上の 1.3 秒の
 /// テストと待つ時間は同じで、違うのは呼び出し側がソケットを見ていたかどうか
-/// だけである。拒否の窓の腕をソケットの腕より先に置くと、このテストが
-/// 落ちる。
+/// だけである。
 #[tokio::test]
 async fn a_prompt_rejection_read_after_the_caller_was_away_is_attributed_to_it() {
     let (channel, delivered, subscribes) = rejection_of_a_quiet_subscribe(Caller::Away {

@@ -59,6 +59,9 @@ pub(super) const OPERATION: &str = "/v1";
 /// フィードは `next` の中でしかソケットを読まないので、`next` が呼ばれて
 /// いない間に届いたフレームの到着時刻は分からない。未読のフレームが残って
 /// いる限り、その中の拒否は窓の中に届いたかもしれないので、窓を閉じない。
+/// 窓を閉じるのは、期限を過ぎてから始めたポーリングで読み込みが `Pending`
+/// を返したとき (`Connection::poll_socket`) だけである。期限のタイマーは
+/// タスクを起こすだけで、窓を閉じない。
 pub(crate) const REJECTION_WINDOW: Duration = Pacer::INTERVAL;
 
 /// 1 回の接続試行。`State::Dialing` に保存され、キャンセルの後も続きから
@@ -148,7 +151,7 @@ impl<C: FeedChannel> Sent<C> {
     /// 望んでいるときだけ外す。別のオプションで望み直した subscribe はまだ
     /// 送っていない別のコマンドだからである。そのようなコマンドがなければ
     /// `None` を返し、何も変えない。読んだ時刻は見ない。窓を閉じるのは
-    /// `step` の `RejectionWindowClosed` だけである。
+    /// ソケットが空だと観測したときの `Step::RejectionWindowClosed` だけである。
     fn rejected(&mut self, desired: &mut BTreeMap<<C as Codec>::Key, C>) -> Option<C> {
         let (_, command) = self.last.take()?;
         match command {
@@ -202,8 +205,12 @@ enum Step {
     WriteTimedOut,
     ExtendDue,
     Extended(Instant, Result<()>),
-    /// 拒否の窓の期限を過ぎ、ソケットに未読のフレームがない。
+    /// 拒否の窓の期限を過ぎてから読み込みが `Pending` を返した。
+    /// ソケットに未読のフレームがない。`poll_socket` だけが返す。
     RejectionWindowClosed,
+    /// 拒否の窓の期限に達した。タスクを起こすだけで状態は変えない。窓を
+    /// 閉じるかどうかは、次のポーリングの `poll_socket` が決める。
+    RejectionWindowDue,
 }
 
 impl Connection {
@@ -215,10 +222,15 @@ impl Connection {
     /// 期限の状態を知るのは flush だけなので、タイマーの腕で先に検査すると
     /// 完了済みの flush を期限切れと誤り、後に検査すると読める限りソケットが
     /// タイマーを飢えさせる。
+    ///
+    /// 拒否の窓も同じように、読み込みが `Pending` を返した直後にここで閉じる。
+    /// ソケットが空だと知るのは読み込みだけだからである。`window_elapsed` は、
+    /// このポーリングを始めた時点で窓の期限を過ぎていたことを表す。
     fn poll_socket(
         &mut self,
         cx: &mut Context<'_>,
         want_write: bool,
+        window_elapsed: bool,
         write_bound: Duration,
         limits: &Limits,
     ) -> Poll<Step> {
@@ -248,6 +260,7 @@ impl Connection {
             }
             Poll::Ready(Some(Err(e))) => Poll::Ready(Step::Failed(ws::error_kind(&e, limits))),
             Poll::Ready(None) => Poll::Ready(Step::Failed(TransportErrorKind::ClosedEarly)),
+            Poll::Pending if window_elapsed => Poll::Ready(Step::RejectionWindowClosed),
             Poll::Pending => Poll::Pending,
         }
     }
@@ -500,6 +513,7 @@ impl<C: FeedChannel> Session<C> {
             .last
             .as_ref()
             .map(|(written_at, _)| *written_at + REJECTION_WINDOW);
+        let window_elapsed = window_closes_at.is_some_and(|at| at <= now);
 
         let step = tokio::select! {
             biased;
@@ -509,8 +523,8 @@ impl<C: FeedChannel> Session<C> {
             }) => Step::Extended(sent_at, result),
             _ = sleep_until(extend_at.unwrap_or(now)), if extend_at.is_some() => Step::ExtendDue,
             _ = sleep_until(slot.unwrap_or(now)), if slot.is_some() && !want_write => Step::SlotReached,
-            step = poll_fn(|cx| conn.poll_socket(cx, want_write, timeouts.ws_write.get(), &inner.config.limits)) => step,
-            _ = sleep_until(window_closes_at.unwrap_or(now)), if window_closes_at.is_some() => Step::RejectionWindowClosed,
+            step = poll_fn(|cx| conn.poll_socket(cx, want_write, window_elapsed, timeouts.ws_write.get(), &inner.config.limits)) => step,
+            _ = sleep_until(window_closes_at.unwrap_or(now)), if window_closes_at.is_some() && !window_elapsed => Step::RejectionWindowDue,
             _ = sleep_until(write_deadline.unwrap_or(now)), if write_deadline.is_some() => Step::WriteTimedOut,
             _ = sleep_until(idle_at) => Step::Idle,
         };
@@ -567,7 +581,7 @@ impl<C: FeedChannel> Session<C> {
                 conn.flush_since.get_or_insert_with(Instant::now);
                 None
             }
-            Step::SlotReached => None,
+            Step::SlotReached | Step::RejectionWindowDue => None,
             Step::RejectionWindowClosed => {
                 sent.last = None;
                 None
