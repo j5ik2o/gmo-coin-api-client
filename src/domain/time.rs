@@ -209,8 +209,6 @@ impl<'de> Deserialize<'de> for Timestamp {
     }
 }
 
-/// 1970-01-01 からの日数 (Howard Hinnant の `days_from_civil`、整数演算のみ)。
-/// 暦として存在しない日付には `None`。
 /// ASCII 数字だけの並びを数値にする。空、数字以外、桁あふれは `None`。
 fn parse_digits(digits: &[u8]) -> Option<u32> {
     if digits.is_empty() {
@@ -222,6 +220,8 @@ fn parse_digits(digits: &[u8]) -> Option<u32> {
     })
 }
 
+/// 1970-01-01 からの日数 (Howard Hinnant の `days_from_civil`、整数演算のみ)。
+/// 暦として存在しない日付には `None`。
 fn days_from_civil(year: u32, month: u32, day: u32) -> Option<i64> {
     if !(1..=12).contains(&month) || day == 0 || day > days_in_month(year, month) {
         return None;

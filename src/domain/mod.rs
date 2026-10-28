@@ -143,10 +143,6 @@ pub(crate) fn check_size_and_lexical(
     }
 }
 
-/// テキスト系プリミティブに共通の `Deserialize` 経路。JSON 文字列 (借用でも
-/// エスケープ済みでも) を受け取り、そのプリミティブ自身のコンストラクタを
-/// 走らせる。他の JSON 型は強制変換せず拒否する (フェイルクローズド)。
-/// serde のエラーにはプリミティブ名と失敗段階だけが入り、値は入らない。
 /// `data` を小文字の 16 進数にして `out` の先頭から書く。`out` が `2 * data.len()`
 /// バイトより短ければ入る分だけ書き、長ければ残りは触らない。
 pub(crate) fn write_hex(out: &mut [u8], data: &[u8]) {
@@ -163,6 +159,10 @@ pub(crate) fn write_hex(out: &mut [u8], data: &[u8]) {
     }
 }
 
+/// テキスト系プリミティブに共通の `Deserialize` 経路。JSON 文字列 (借用でも
+/// エスケープ済みでも) を受け取り、そのプリミティブ自身のコンストラクタを
+/// 走らせる。他の JSON 型は強制変換せず拒否する (フェイルクローズド)。
+/// serde のエラーにはプリミティブ名と失敗段階だけが入り、値は入らない。
 pub(crate) fn deserialize_text<'de, D, T>(
     d: D,
     parse: fn(&str) -> Result<T, InvalidValue>,
