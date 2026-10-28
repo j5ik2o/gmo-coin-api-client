@@ -568,9 +568,11 @@ impl<C: FeedChannel> Session<C> {
             }
             Step::Failed(kind) => Some(Ok(self.drop_connection(live_failure(C::API, kind)))),
             Step::WriteReady => {
-                let Some((channel, subscribe)) = command else {
-                    unreachable!("want_write implies a command");
-                };
+                #[expect(
+                    clippy::expect_used,
+                    reason = "want_write は command が Some のときだけ真になり、poll_socket は want_write が真のときだけ WriteReady を返す"
+                )]
+                let (channel, subscribe) = command.expect("want_write implies a command");
                 if pacer.take().is_err() {
                     return None;
                 }
