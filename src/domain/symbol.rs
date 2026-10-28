@@ -40,65 +40,65 @@ impl Symbol {
     /// 銘柄の最大バイト数。
     pub const MAX_LEN: usize = 31;
 
-    /// 現物銘柄 `BTC`。
+    /// 現物銘柄 `BTC` (ビットコイン)。
     pub const BTC: Symbol = Symbol::from_static("BTC");
-    /// 現物銘柄 `ETH`。
+    /// 現物銘柄 `ETH` (イーサリアム)。
     pub const ETH: Symbol = Symbol::from_static("ETH");
-    /// 現物銘柄 `BCH`。
+    /// 現物銘柄 `BCH` (ビットコインキャッシュ)。
     pub const BCH: Symbol = Symbol::from_static("BCH");
-    /// 現物銘柄 `LTC`。
+    /// 現物銘柄 `LTC` (ライトコイン)。
     pub const LTC: Symbol = Symbol::from_static("LTC");
-    /// 現物銘柄 `XRP`。
+    /// 現物銘柄 `XRP` (エックスアールピー)。
     pub const XRP: Symbol = Symbol::from_static("XRP");
-    /// 現物銘柄 `XLM`。
+    /// 現物銘柄 `XLM` (ステラルーメン)。
     pub const XLM: Symbol = Symbol::from_static("XLM");
-    /// 現物銘柄 `DOT`。
+    /// 現物銘柄 `DOT` (ポルカドット)。
     pub const DOT: Symbol = Symbol::from_static("DOT");
-    /// 現物銘柄 `ATOM`。
+    /// 現物銘柄 `ATOM` (コスモス)。
     pub const ATOM: Symbol = Symbol::from_static("ATOM");
-    /// 現物銘柄 `FCR`。
+    /// 現物銘柄 `FCR` (FCRコイン)。
     pub const FCR: Symbol = Symbol::from_static("FCR");
-    /// 現物銘柄 `ADA`。
+    /// 現物銘柄 `ADA` (カルダノ)。
     pub const ADA: Symbol = Symbol::from_static("ADA");
-    /// 現物銘柄 `LINK`。
+    /// 現物銘柄 `LINK` (チェーンリンク)。
     pub const LINK: Symbol = Symbol::from_static("LINK");
-    /// 現物銘柄 `DOGE`。
+    /// 現物銘柄 `DOGE` (ドージコイン)。
     pub const DOGE: Symbol = Symbol::from_static("DOGE");
-    /// 現物銘柄 `SOL`。
+    /// 現物銘柄 `SOL` (ソラナ)。
     pub const SOL: Symbol = Symbol::from_static("SOL");
-    /// 現物銘柄 `ASTR`。
+    /// 現物銘柄 `ASTR` (アスター)。
     pub const ASTR: Symbol = Symbol::from_static("ASTR");
-    /// 現物銘柄 `NAC`。
+    /// 現物銘柄 `NAC` (NOT A HOTEL COIN)。
     pub const NAC: Symbol = Symbol::from_static("NAC");
-    /// 現物銘柄 `SUI`。
+    /// 現物銘柄 `SUI` (スイ)。
     pub const SUI: Symbol = Symbol::from_static("SUI");
-    /// 現物銘柄 `WILD`。
+    /// 現物銘柄 `WILD` (ワイルダーワールド)。
     pub const WILD: Symbol = Symbol::from_static("WILD");
     /// 日本円 (`JPY`)。資産残高などで使う。
     pub const JPY: Symbol = Symbol::from_static("JPY");
-    /// レバレッジ銘柄 `BTC_JPY`。
+    /// レバレッジ銘柄 `BTC_JPY` (ビットコイン/円)。
     pub const BTC_JPY: Symbol = Symbol::from_static("BTC_JPY");
-    /// レバレッジ銘柄 `ETH_JPY`。
+    /// レバレッジ銘柄 `ETH_JPY` (イーサリアム/円)。
     pub const ETH_JPY: Symbol = Symbol::from_static("ETH_JPY");
-    /// レバレッジ銘柄 `BCH_JPY`。
+    /// レバレッジ銘柄 `BCH_JPY` (ビットコインキャッシュ/円)。
     pub const BCH_JPY: Symbol = Symbol::from_static("BCH_JPY");
-    /// レバレッジ銘柄 `LTC_JPY`。
+    /// レバレッジ銘柄 `LTC_JPY` (ライトコイン/円)。
     pub const LTC_JPY: Symbol = Symbol::from_static("LTC_JPY");
-    /// レバレッジ銘柄 `XRP_JPY`。
+    /// レバレッジ銘柄 `XRP_JPY` (エックスアールピー/円)。
     pub const XRP_JPY: Symbol = Symbol::from_static("XRP_JPY");
-    /// レバレッジ銘柄 `DOT_JPY`。
+    /// レバレッジ銘柄 `DOT_JPY` (ポルカドット/円)。
     pub const DOT_JPY: Symbol = Symbol::from_static("DOT_JPY");
-    /// レバレッジ銘柄 `ATOM_JPY`。
+    /// レバレッジ銘柄 `ATOM_JPY` (コスモス/円)。
     pub const ATOM_JPY: Symbol = Symbol::from_static("ATOM_JPY");
-    /// レバレッジ銘柄 `ADA_JPY`。
+    /// レバレッジ銘柄 `ADA_JPY` (カルダノ/円)。
     pub const ADA_JPY: Symbol = Symbol::from_static("ADA_JPY");
-    /// レバレッジ銘柄 `LINK_JPY`。
+    /// レバレッジ銘柄 `LINK_JPY` (チェーンリンク/円)。
     pub const LINK_JPY: Symbol = Symbol::from_static("LINK_JPY");
-    /// レバレッジ銘柄 `DOGE_JPY`。
+    /// レバレッジ銘柄 `DOGE_JPY` (ドージコイン/円)。
     pub const DOGE_JPY: Symbol = Symbol::from_static("DOGE_JPY");
-    /// レバレッジ銘柄 `SOL_JPY`。
+    /// レバレッジ銘柄 `SOL_JPY` (ソラナ/円)。
     pub const SOL_JPY: Symbol = Symbol::from_static("SOL_JPY");
-    /// レバレッジ銘柄 `SUI_JPY`。
+    /// レバレッジ銘柄 `SUI_JPY` (スイ/円)。
     pub const SUI_JPY: Symbol = Symbol::from_static("SUI_JPY");
 
     /// 定数用のコンパイル時コンストラクタ。不正なリテラルは実行時検査ではなく
