@@ -134,7 +134,14 @@ impl core::fmt::Display for InvalidValue {
         write!(f, "{:?} の値が不正です: ", self.primitive)?;
         match self.violation {
             Violation::Size { min, max, actual } => {
-                write!(f, "長さ {actual} バイトは {min}..={max} の範囲外です")
+                // 件数に上限のあるリスト ([`Primitive::Batch`]) の長さは要素の
+                // 件数、他のプリミティブは入力のバイト数である (`Violation::Size`)。
+                let unit = if self.primitive == Primitive::Batch {
+                    "件"
+                } else {
+                    "バイト"
+                };
+                write!(f, "長さ {actual} {unit}は {min}..={max} の範囲外です")
             }
             Violation::Lexical { offset } => {
                 write!(f, "オフセット {offset} に許されない文字があります")
@@ -272,5 +279,35 @@ mod tests {
         let text = err.to_string();
         assert!(text.contains("ApiSecret"));
         assert!(text.contains("オフセット 3"));
+    }
+
+    #[test]
+    fn a_batch_size_violation_is_reported_in_items() {
+        let ids = (1..=11)
+            .map(|n| OrderId::new(n).expect("1..=11 is a positive u64"))
+            .collect();
+        let err = Batch::<OrderId, 10>::new(ids).unwrap_err();
+        assert_eq!(
+            err.violation,
+            Violation::Size {
+                min: 1,
+                max: 10,
+                actual: 11
+            }
+        );
+
+        let text = err.to_string();
+        assert!(text.contains("長さ 11 件"), "{text}");
+        assert!(!text.contains("バイト"), "{text}");
+    }
+
+    #[test]
+    fn a_size_violation_of_a_text_primitive_is_reported_in_bytes() {
+        let too_long = "A".repeat(Symbol::MAX_LEN + 1);
+        let err = Symbol::parse(&too_long).unwrap_err();
+
+        let text = err.to_string();
+        assert!(text.contains("バイト"), "{text}");
+        assert!(!text.contains("件"), "{text}");
     }
 }
