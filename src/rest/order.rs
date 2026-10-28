@@ -524,14 +524,14 @@ mod tests {
             client_order_id: ClientOrderId::parse("c1").unwrap(),
             symbol: Symbol::BTC_JPY,
             side: Side::Sell,
-            position_id: PositionId::new(1234567).unwrap(),
+            position_id: PositionId::new(1_234_567).unwrap(),
             size: OrderSize::parse("0.1").unwrap(),
             execution: CloseExecution::MarketCancelBefore,
         };
         assert_eq!(
             body(&c.wire()),
             json!({"symbol":"BTC_JPY","side":"SELL","executionType":"MARKET","cancelBefore":true,
-                   "settlePosition":[{"positionId":1234567,"size":"0.1"}],"clientOrderId":"c1"})
+                   "settlePosition":[{"positionId":1_234_567,"size":"0.1"}],"clientOrderId":"c1"})
         );
     }
 
@@ -557,7 +557,7 @@ mod tests {
             client_order_id: ClientOrderId::parse("c1").unwrap(),
             symbol: Symbol::BTC_JPY,
             side: Side::Sell,
-            position_id: PositionId::new(1234567).unwrap(),
+            position_id: PositionId::new(1_234_567).unwrap(),
             size: OrderSize::parse("0.1").unwrap(),
             execution: CloseExecution::Limit {
                 price: price("1000"),
@@ -567,7 +567,7 @@ mod tests {
         assert_eq!(
             body(&c.wire()),
             json!({"symbol":"BTC_JPY","side":"SELL","executionType":"LIMIT","timeInForce":"SOK","price":"1000",
-                   "settlePosition":[{"positionId":1234567,"size":"0.1"}],"clientOrderId":"c1"})
+                   "settlePosition":[{"positionId":1_234_567,"size":"0.1"}],"clientOrderId":"c1"})
         );
     }
 

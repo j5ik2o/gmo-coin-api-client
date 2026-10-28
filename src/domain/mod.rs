@@ -221,6 +221,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::assert_is_empty,
+        reason = "空かどうかを見る意図を is_empty で直接書く。assert_eq! に直すと空配列の型注釈が要り、読みにくくなる"
+    )]
     fn a_json_number_is_not_coerced_into_a_text_primitive() {
         let err = serde_json::from_str::<Symbol>("123").unwrap_err();
         assert!(!err.to_string().is_empty());

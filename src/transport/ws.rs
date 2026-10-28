@@ -103,8 +103,10 @@ pub(crate) fn error_kind(e: &WsError, limits: &Limits) -> TransportErrorKind {
 
 #[cfg(test)]
 mod tests {
-    // tungstenite の `Callback` は `Result<Response, ErrorResponse>` を要求する。
-    #![allow(clippy::result_large_err)]
+    #![expect(
+        clippy::result_large_err,
+        reason = "tungstenite の `Callback` は `Result<Response, ErrorResponse>` を要求し、`ErrorResponse` は大きい"
+    )]
 
     use futures_util::{SinkExt, StreamExt};
     use tokio::net::TcpListener;
@@ -118,7 +120,7 @@ mod tests {
     async fn server<F, Fut>(serve: F) -> std::net::SocketAddr
     where
         F: FnOnce(WebSocketStream<tokio::net::TcpStream>, http::Uri) -> Fut + Send + 'static,
-        Fut: std::future::Future<Output = ()> + Send,
+        Fut: Future<Output = ()> + Send,
     {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();

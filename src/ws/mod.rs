@@ -540,8 +540,8 @@ mod tests {
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
         let handles: Vec<_> = (0..8)
             .map(|_| {
-                let pacer = pacer.clone();
-                let barrier = barrier.clone();
+                let pacer = std::sync::Arc::clone(&pacer);
+                let barrier = std::sync::Arc::clone(&barrier);
                 std::thread::spawn(move || {
                     barrier.wait();
                     pacer.take().is_ok()

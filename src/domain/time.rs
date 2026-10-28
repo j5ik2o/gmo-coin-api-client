@@ -660,7 +660,7 @@ mod tests {
         let a = ts("2019-03-19T02:15:06.001Z");
         let b = ts("2019-03-19T02:45:06.001Z");
         assert!(a < b);
-        assert_eq!(b.duration_since(a), Some(Duration::from_secs(30 * 60)));
+        assert_eq!(b.duration_since(a), Some(Duration::from_mins(30)));
         assert_eq!(a.duration_since(b), None);
     }
 

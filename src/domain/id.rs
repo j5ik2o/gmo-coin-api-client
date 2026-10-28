@@ -325,18 +325,18 @@ mod tests {
     fn ids_decode_from_a_number_and_from_a_digit_string() {
         assert_eq!(
             serde_json::from_str::<OrderId>("637000").unwrap().get(),
-            637000
+            637_000
         );
         assert_eq!(
             serde_json::from_str::<OrderId>("\"637000\"").unwrap().get(),
-            637000
+            637_000
         );
         assert!(serde_json::from_str::<OrderId>("0").is_err());
         assert!(serde_json::from_str::<OrderId>("-5").is_err());
         assert!(serde_json::from_str::<OrderId>("1.5").is_err());
         assert!(serde_json::from_str::<OrderId>("\"12a\"").is_err());
         assert_eq!(
-            serde_json::to_string(&ExecutionId::new(72123911).unwrap()).unwrap(),
+            serde_json::to_string(&ExecutionId::new(72_123_911).unwrap()).unwrap(),
             "72123911"
         );
     }

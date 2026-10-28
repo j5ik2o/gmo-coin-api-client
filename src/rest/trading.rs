@@ -834,6 +834,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::assert_is_empty,
+        reason = "空かどうかを見る意図を is_empty で直接書く。assert_eq! に直すと空配列の型注釈が要り、読みにくくなる"
+    )]
     fn a_mix_of_accepted_and_rejected_ids_is_a_value() {
         let outcome = check_cancel_outcome(
             &ids(&[1, 2, 3, 4]),
@@ -898,6 +902,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::assert_is_empty,
+        reason = "空かどうかを見る意図を is_empty で直接書く。assert_eq! に直すと空配列の型注釈が要り、読みにくくなる"
+    )]
     fn the_list_shape_accepts_a_list_and_the_empty_object() {
         let full: List<u32> = serde_json::from_str(r#"{"list":[1,2]}"#).unwrap();
         assert_eq!(full.list, [1, 2]);

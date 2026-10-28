@@ -342,7 +342,7 @@ mod tests {
     fn construction_does_no_io_and_authenticate_shares_the_inner() {
         let client = Client::production();
         let inner = Arc::as_ptr(&client.inner);
-        let signed = client.authenticate(crate::secret::Credentials::new(
+        let signed = client.authenticate(Credentials::new(
             crate::secret::ApiKey::new("k".to_owned()).unwrap(),
             crate::secret::ApiSecret::new("s".to_owned()).unwrap(),
         ));
