@@ -124,6 +124,10 @@ impl Call {
     /// リクエスト型では起きない (文字列でないマップキーも浮動小数点もない)。
     /// パニックすれば何も送られない。空のボディで代用すると、誤ったリクエストに
     /// 署名して送ってしまう。
+    #[expect(
+        clippy::expect_used,
+        reason = "ドメインのプリミティブだけから組んだ本文は直列化に失敗しない。失敗時に空本文へ逃がすと誤ったリクエストに署名してしまうため、panic が文書化された契約である"
+    )]
     pub(crate) fn json<B: Serialize>(mut self, body: &B) -> Self {
         let bytes =
             serde_json::to_vec(body).expect("request bodies are built from domain primitives");
@@ -192,6 +196,11 @@ impl Answer {
     /// `data` を持たないと文書化された操作 (changeOrder、cancelOrder、
     /// changeLosscutPrice、ws-auth の PUT と DELETE) のため。取引所が将来
     /// `data` を加えても無視する。この呼び出しが必要とする状態は含まれない。
+    #[expect(
+        clippy::unused_self,
+        clippy::unnecessary_wraps,
+        reason = "data を持たない操作も、data を読む操作と同じ answer.xxx()? の形で受けるための入口"
+    )]
     pub(crate) fn empty(self) -> Result<()> {
         Ok(())
     }
@@ -244,6 +253,10 @@ impl<A: Access> Client<A> {
         };
         let target = call.target(&base.prefix);
         let host = base.host_header();
+        #[expect(
+            clippy::expect_used,
+            reason = "ターゲットとヘッダは検証済みのプリミティブから組むので、リクエストの構築は失敗しない"
+        )]
         let mut encode = || {
             let mut request = http::Request::builder()
                 .method(call.endpoint.method.to_http())
@@ -288,7 +301,7 @@ impl<A: Access> Client<A> {
 impl Client<Authenticated> {
     /// 署名付きの Private REST 呼び出しを送る。
     pub(crate) async fn private(&self, call: Call) -> Result<Answer> {
-        let credentials = self.access.0.clone();
+        let credentials = std::sync::Arc::clone(&self.access.0);
         self.send(ApiGroup::PrivateRest, Some(&credentials), call)
             .await
     }
@@ -298,8 +311,7 @@ impl Client<Authenticated> {
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
-        .unwrap_or(0)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 /// ページ番号で区切られたリスト (trades、activeOrders、latestExecutions、
@@ -370,7 +382,7 @@ pub(crate) struct WireListing<T> {
     pub(crate) other_keys: usize,
 }
 
-impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for WireListing<T> {
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for WireListing<T> {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> core::result::Result<Self, D::Error> {
         use serde::de::{Error, IgnoredAny, MapAccess, Visitor};
 
@@ -385,7 +397,7 @@ impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for WireListing<T>
 
         struct ListingVisitor<T>(core::marker::PhantomData<T>);
 
-        impl<'de, T: serde::Deserialize<'de>> Visitor<'de> for ListingVisitor<T> {
+        impl<'de, T: Deserialize<'de>> Visitor<'de> for ListingVisitor<T> {
             type Value = WireListing<T>;
 
             fn expecting(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -467,7 +479,7 @@ pub struct Pagination {
     pub count: u32,
 }
 
-impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for Page<T> {
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for Page<T> {
     /// `{}` は空のページ。`pagination` と `list` がそろっていればそのページで、
     /// 他のキーは無視する。片方だけ、または `{}` 以外で両方欠けていれば形の誤り。
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> core::result::Result<Self, D::Error> {

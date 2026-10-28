@@ -164,6 +164,19 @@ Private API は本番では確かめていません。公式ドキュメント�
 
 `tests/fixtures/` の応答例は、公式ドキュメントから `tools/` のスクリプトで取り出したものです。
 
+## 変更を出す前に
+
+変更を出すときは、次の 4 つがすべて通ることを手元で確かめてください。同じ検査を CI も走らせます。
+
+```sh
+cargo fmt --check
+cargo clippy --all-targets --locked -- -D warnings
+cargo test --locked
+RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --locked
+```
+
+lint の水準は `Cargo.toml` の `[lints]` が決めています。警告を黙らせるときは、`#[expect(..., reason = "...")]` で対象を小さく絞り、理由を書いてください。
+
 ## ライセンス
 
 まだ決まっていません。`Cargo.toml` の `license` は暫定の値で、`LICENSE` ファイルは置いていません。

@@ -228,6 +228,10 @@ mod tests {
 
     #[test]
     fn every_public_fixture_decodes() {
+        #[derive(Deserialize)]
+        struct Data {
+            status: ExchangeStatus,
+        }
         let tickers: Vec<Ticker> =
             answer(include_str!("../../tests/fixtures/public_get_ticker.json"))
                 .data()
@@ -253,7 +257,7 @@ mod tests {
             answer(include_str!("../../tests/fixtures/public_get_klines.json"))
                 .data()
                 .unwrap();
-        assert_eq!(klines[0].open_time.unix_millis(), 1618588800000);
+        assert_eq!(klines[0].open_time.unix_millis(), 1_618_588_800_000);
         assert_eq!(klines[1].close.to_string(), "6418245");
 
         let rules: Vec<SymbolRule> =
@@ -263,10 +267,6 @@ mod tests {
         assert!(rules[0].maker_fee.is_negative());
         assert_eq!(rules[1].symbol, Symbol::BTC_JPY);
 
-        #[derive(Deserialize)]
-        struct Data {
-            status: ExchangeStatus,
-        }
         let status: Data = answer(include_str!("../../tests/fixtures/public_get_status.json"))
             .data()
             .unwrap();

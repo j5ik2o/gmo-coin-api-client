@@ -72,6 +72,11 @@ impl Symbol {
 
     /// 定数用のコンパイル時コンストラクタ。不正なリテラルは実行時検査ではなく
     /// ビルドを失敗させる。
+    #[expect(
+        clippy::indexing_slicing,
+        clippy::cast_possible_truncation,
+        reason = "const fn では get が使えない。直前の assert が i < src.len() <= MAX_LEN (31) を保証し、違反はビルドを失敗させる"
+    )]
     const fn from_static(text: &str) -> Symbol {
         let src = text.as_bytes();
         assert!(
@@ -109,19 +114,21 @@ impl Symbol {
     pub fn parse(text: &str) -> Result<Symbol, InvalidValue> {
         check_size_and_lexical(Primitive::Symbol, text, 1, Self::MAX_LEN, Self::allowed)?;
         let mut bytes = [0u8; Self::MAX_LEN];
-        bytes[..text.len()].copy_from_slice(text.as_bytes());
-        Ok(Symbol {
-            len: text.len() as u8,
-            bytes,
-        })
+        for (dst, src) in bytes.iter_mut().zip(text.as_bytes()) {
+            *dst = *src;
+        }
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "check_size_and_lexical が長さを 1..=MAX_LEN (31) に絞っている"
+        )]
+        let len = text.len() as u8;
+        Ok(Symbol { len, bytes })
     }
 
     pub fn as_str(&self) -> &str {
-        debug_assert!(
-            self.bytes[..self.len as usize].is_ascii(),
-            "Symbol::parse admits ASCII only"
-        );
-        core::str::from_utf8(&self.bytes[..self.len as usize]).unwrap_or_default()
+        let used = self.bytes.get(..usize::from(self.len)).unwrap_or_default();
+        debug_assert!(used.is_ascii(), "Symbol::parse admits ASCII only");
+        core::str::from_utf8(used).unwrap_or_default()
     }
 
     /// 綴りから導かれ、決して保存されないので、銘柄と食い違うことがない。

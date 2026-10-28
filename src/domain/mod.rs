@@ -143,6 +143,22 @@ pub(crate) fn check_size_and_lexical(
     }
 }
 
+/// `data` を小文字の 16 進数にして `out` の先頭から書く。`out` が `2 * data.len()`
+/// バイトより短ければ入る分だけ書き、長ければ残りは触らない。
+pub(crate) fn write_hex(out: &mut [u8], data: &[u8]) {
+    fn digit(nibble: u8) -> u8 {
+        if nibble < 10 {
+            b'0' + nibble
+        } else {
+            b'a' + (nibble - 10)
+        }
+    }
+    let (pairs, _) = out.as_chunks_mut::<2>();
+    for (pair, byte) in pairs.iter_mut().zip(data) {
+        *pair = [digit(byte >> 4), digit(byte & 0x0f)];
+    }
+}
+
 /// テキスト系プリミティブに共通の `Deserialize` 経路。JSON 文字列 (借用でも
 /// エスケープ済みでも) を受け取り、そのプリミティブ自身のコンストラクタを
 /// 走らせる。他の JSON 型は強制変換せず拒否する (フェイルクローズド)。
@@ -155,7 +171,7 @@ where
     D: serde::Deserializer<'de>,
 {
     struct Text<T>(fn(&str) -> Result<T, InvalidValue>);
-    impl<'de, T> serde::de::Visitor<'de> for Text<T> {
+    impl<T> serde::de::Visitor<'_> for Text<T> {
         type Value = T;
         fn expecting(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
             f.write_str("a JSON string")
@@ -205,6 +221,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::assert_is_empty,
+        reason = "空かどうかを見る意図を is_empty で直接書く。assert_eq! に直すと空配列の型注釈が要り、読みにくくなる"
+    )]
     fn a_json_number_is_not_coerced_into_a_text_primitive() {
         let err = serde_json::from_str::<Symbol>("123").unwrap_err();
         assert!(!err.to_string().is_empty());

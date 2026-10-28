@@ -90,7 +90,10 @@ impl Pool {
     }
 
     fn checkout(&self) -> Option<Sender> {
-        let mut idle = self.idle.lock().unwrap_or_else(|e| e.into_inner());
+        let mut idle = self
+            .idle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let now = Instant::now();
         idle.retain(|(sender, since)| {
             !sender.is_closed() && now.duration_since(*since) < Self::IDLE_TTL
@@ -99,7 +102,10 @@ impl Pool {
     }
 
     fn checkin(&self, sender: Sender) {
-        let mut idle = self.idle.lock().unwrap_or_else(|e| e.into_inner());
+        let mut idle = self
+            .idle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if idle.len() >= usize::from(self.max_idle) {
             if self.max_idle == 0 {
                 return;
@@ -154,22 +160,20 @@ pub(crate) async fn round_trip(
     let mut retried = false;
     loop {
         let pooled = if retried { None } else { route.pool.checkout() };
-        let (mut sender, reused) = match pooled {
-            Some(sender) => (sender, true),
-            None => {
-                let stream = connector
-                    .connect(route.base, &config.timeouts)
-                    .await
-                    .map_err(|k| fail(k, Delivery::NotSent))?;
-                let (sender, connection) =
-                    hyper::client::conn::http1::handshake(TokioIo::new(stream))
-                        .await
-                        .map_err(|e| fail(hyper_kind(&e), Delivery::NotSent))?;
-                tokio::spawn(async move {
-                    let _ = connection.await;
-                });
-                (sender, false)
-            }
+        let (mut sender, reused) = if let Some(sender) = pooled {
+            (sender, true)
+        } else {
+            let stream = connector
+                .connect(route.base, &config.timeouts)
+                .await
+                .map_err(|k| fail(k, Delivery::NotSent))?;
+            let (sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
+                .await
+                .map_err(|e| fail(hyper_kind(&e), Delivery::NotSent))?;
+            tokio::spawn(async move {
+                let _ = connection.await;
+            });
+            (sender, false)
         };
         let request = encode();
         let mut delivery = Delivery::NotSent;

@@ -1,5 +1,6 @@
 //! クライアントのハンドルとその設定。
 
+use core::fmt;
 use core::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,6 +30,12 @@ use crate::ws::Pacer;
 pub struct Client<A: Access = Anonymous> {
     pub(crate) inner: Arc<Inner>,
     pub(crate) access: A,
+}
+
+impl<A: Access> fmt::Debug for Client<A> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Client").finish_non_exhaustive()
+    }
 }
 
 /// 封印されている: 以下の 2 つの状態だけが存在する。
@@ -133,6 +140,10 @@ pub struct Config {
 
 impl Default for Config {
     /// [`Timeouts`]、[`Limits`]、[`Backoff`] それぞれの既定値。
+    #[expect(
+        clippy::expect_used,
+        reason = "定数の既定値が検証範囲内であることは単体テストで確かめており、実行時には失敗しない"
+    )]
     fn default() -> Self {
         let secs = |n| Timeout::new(Duration::from_secs(n)).expect("within 1 ms..=10 min");
         Self {
@@ -331,7 +342,7 @@ mod tests {
     fn construction_does_no_io_and_authenticate_shares_the_inner() {
         let client = Client::production();
         let inner = Arc::as_ptr(&client.inner);
-        let signed = client.authenticate(crate::secret::Credentials::new(
+        let signed = client.authenticate(Credentials::new(
             crate::secret::ApiKey::new("k".to_owned()).unwrap(),
             crate::secret::ApiSecret::new("s".to_owned()).unwrap(),
         ));

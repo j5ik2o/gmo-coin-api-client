@@ -237,6 +237,12 @@ pub struct Feed<C: FeedChannel> {
     session: session::Session<C>,
 }
 
+impl<C: FeedChannel> core::fmt::Debug for Feed<C> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Feed").finish_non_exhaustive()
+    }
+}
+
 impl<C: FeedChannel> Feed<C> {
     /// `channel` を望ましい集合に加える。同じキーのものがあれば置き換える。
     ///
@@ -334,7 +340,7 @@ impl<A: Access> Client<A> {
     /// 失敗しない。
     pub fn public_feed(&self) -> Feed<PublicChannel> {
         Feed {
-            session: session::Session::public(self.inner.clone()),
+            session: session::Session::public(std::sync::Arc::clone(&self.inner)),
         }
     }
 
@@ -456,6 +462,11 @@ pub(crate) struct Pacer {
     interval_nanos: AtomicU64,
 }
 
+/// 584 年を超える長さは `u64::MAX` に丸める。
+fn as_nanos_u64(d: Duration) -> u64 {
+    u64::try_from(d.as_nanos()).unwrap_or(u64::MAX)
+}
+
 impl Pacer {
     /// 1 秒の上限に、タイマーの粗さとサーバ側の計時のずれの分を足したもの。
     pub(crate) const INTERVAL: Duration = Duration::from_millis(1_050);
@@ -464,7 +475,7 @@ impl Pacer {
         Self {
             origin: Instant::now(),
             next_free_nanos: AtomicU64::new(0),
-            interval_nanos: AtomicU64::new(Self::INTERVAL.as_nanos() as u64),
+            interval_nanos: AtomicU64::new(as_nanos_u64(Self::INTERVAL)),
         }
     }
 
@@ -482,7 +493,7 @@ impl Pacer {
     /// 先に取った後の値) で、呼び出し側はそれまで待って取り直す。
     pub(crate) fn take(&self) -> Result<(), Instant> {
         let interval = self.interval_nanos.load(Ordering::Relaxed);
-        let now = self.origin.elapsed().as_nanos() as u64;
+        let now = as_nanos_u64(self.origin.elapsed());
         let current = self.next_free_nanos.load(Ordering::Acquire);
         if current > now {
             return Err(self.origin + Duration::from_nanos(current));
@@ -529,8 +540,8 @@ mod tests {
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
         let handles: Vec<_> = (0..8)
             .map(|_| {
-                let pacer = pacer.clone();
-                let barrier = barrier.clone();
+                let pacer = std::sync::Arc::clone(&pacer);
+                let barrier = std::sync::Arc::clone(&barrier);
                 std::thread::spawn(move || {
                     barrier.wait();
                     pacer.take().is_ok()

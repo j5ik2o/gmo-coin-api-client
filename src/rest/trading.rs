@@ -172,7 +172,7 @@ fn check_bulk_cancel_ids(ids: &[OrderId]) -> core::result::Result<(), Postcondit
         return Err(Postcondition::BulkCancelTooManyIds { actual: ids.len() });
     }
     for (i, id) in ids.iter().enumerate() {
-        if ids[..i].contains(id) {
+        if ids.iter().take(i).any(|seen| seen == id) {
             return Err(Postcondition::BulkCancelIdRepeated(*id));
         }
     }
@@ -832,6 +832,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::assert_is_empty,
+        reason = "空かどうかを見る意図を is_empty で直接書く。assert_eq! に直すと空配列の型注釈が要り、読みにくくなる"
+    )]
     fn a_mix_of_accepted_and_rejected_ids_is_a_value() {
         let outcome = check_cancel_outcome(
             &ids(&[1, 2, 3, 4]),
@@ -890,12 +894,28 @@ mod tests {
     }
 
     #[test]
+    fn a_bulk_cancel_answer_reports_the_id_whose_repeat_comes_first() {
+        assert_eq!(
+            check_bulk_cancel_ids(&ids(&[1, 2, 2, 1])),
+            Err(Postcondition::BulkCancelIdRepeated(id(2)))
+        );
+        assert_eq!(
+            check_bulk_cancel_ids(&ids(&[2, 1, 1, 2])),
+            Err(Postcondition::BulkCancelIdRepeated(id(1)))
+        );
+    }
+
+    #[test]
     fn an_empty_answer_leaves_every_sent_id_unaccounted() {
         let outcome = check_cancel_outcome(&ids(&[5, 6]), vec![], vec![]).unwrap();
         assert_eq!(outcome.unaccounted(), ids(&[5, 6]));
     }
 
     #[test]
+    #[expect(
+        clippy::assert_is_empty,
+        reason = "空かどうかを見る意図を is_empty で直接書く。assert_eq! に直すと空配列の型注釈が要り、読みにくくなる"
+    )]
     fn the_list_shape_accepts_a_list_and_the_empty_object() {
         let full: List<u32> = serde_json::from_str(r#"{"list":[1,2]}"#).unwrap();
         assert_eq!(full.list, [1, 2]);

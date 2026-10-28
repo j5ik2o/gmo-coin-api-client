@@ -17,12 +17,20 @@
 //! `ws-auth` の 3 操作は期待を登録しなくても動く組み込みルートで、
 //! [`TokenStore`] を更新する。期待を登録すればそちらが優先される。
 
-// 各テストバイナリはモックの異なる部分集合を使う。
-#![allow(dead_code, unused_imports)]
+#![expect(
+    dead_code,
+    reason = "各テストバイナリはモックの異なる部分集合を使い、このモジュールをそれぞれ別にコンパイルする"
+)]
+#![expect(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    reason = "テストの補助関数は #[test] 関数ではないため clippy.toml の allow-*-in-tests が届かない。失敗はそのままテストの失敗になる"
+)]
 
 mod http;
-pub mod sign;
-mod ws;
+pub(crate) mod sign;
+pub(crate) mod ws;
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -31,16 +39,16 @@ use std::time::{Duration, Instant};
 use gmo_coin_api_client::{Anonymous, ApiKey, ApiSecret, Client, Config, Credentials, Endpoints};
 use tokio::net::TcpListener;
 
-pub use ws::{Api, WsControl};
+pub(crate) use ws::WsControl;
 
 /// モックが署名を検証する固定の認証情報。
-pub const TEST_KEY: &str = "mockkey0123456789";
-pub const TEST_SECRET: &str = "mocksecret0123456789";
+pub(crate) const TEST_KEY: &str = "mockkey0123456789";
+pub(crate) const TEST_SECRET: &str = "mocksecret0123456789";
 
 /// `API-TIMESTAMP` が現在時刻からこれ以上離れていると ERR-5008/5009 を返す。
-pub const TIMESTAMP_WINDOW: Duration = Duration::from_secs(60);
+pub(crate) const TIMESTAMP_WINDOW: Duration = Duration::from_secs(60);
 
-pub struct MockExchange {
+pub(crate) struct MockExchange {
     addr: SocketAddr,
     state: Arc<Mutex<State>>,
     accept_loop: tokio::task::JoinHandle<()>,
@@ -74,7 +82,7 @@ struct Route {
 
 /// 定型の応答。
 #[derive(Clone, Debug)]
-pub enum Reply {
+pub(crate) enum Reply {
     /// `tests/fixtures/` のファイルを HTTP 200 で送る。
     Fixture(&'static str),
     /// リテラルの本文を HTTP 200 で送る (取引所はエラーでも通常 200 を返す)。
@@ -100,7 +108,7 @@ pub enum Reply {
 
 /// 受信したリクエスト 1 つ。
 #[derive(Clone, Debug)]
-pub struct Recorded {
+pub(crate) struct Recorded {
     pub method: String,
     pub path: String,
     pub query: Option<String>,
@@ -110,7 +118,7 @@ pub struct Recorded {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SignatureCheck {
+pub(crate) enum SignatureCheck {
     /// 認証ヘッダがない (Public 呼び出し)。
     Absent,
     Valid,
@@ -121,7 +129,7 @@ pub enum SignatureCheck {
 /// Private WebSocket のトークン。発行・延長・削除を記録し、取引所の規則
 /// (最大 5 個、超えたら有効期限が最も近いものを削除) を守る。
 #[derive(Default)]
-pub struct TokenStore {
+pub(crate) struct TokenStore {
     live: Vec<(String, Instant)>,
     pub issued: Vec<String>,
     pub extended: Vec<String>,
@@ -132,11 +140,11 @@ pub struct TokenStore {
 }
 
 impl TokenStore {
-    pub const MAX_LIVE: usize = 5;
-    pub const LIFETIME: Duration = Duration::from_secs(60 * 60);
+    pub(crate) const MAX_LIVE: usize = 5;
+    pub(crate) const LIFETIME: Duration = Duration::from_hours(1);
 
     /// 新しいトークンを発行する。6 個目は有効期限が最も近いものを追い出す。
-    pub fn issue(&mut self) -> String {
+    pub(crate) fn issue(&mut self) -> String {
         self.counter += 1;
         let token = format!("mocktoken{:04}", self.counter);
         if self.live.len() >= Self::MAX_LIVE {
@@ -156,7 +164,7 @@ impl TokenStore {
     }
 
     /// 有効期限を 60 分にリセットする。生きていなければ `false`。
-    pub fn extend(&mut self, token: &str) -> bool {
+    pub(crate) fn extend(&mut self, token: &str) -> bool {
         match self.live.iter_mut().find(|(t, _)| t == token) {
             Some((_, expiry)) => {
                 *expiry = Instant::now() + Self::LIFETIME;
@@ -168,7 +176,7 @@ impl TokenStore {
     }
 
     /// 削除する。生きていなければ `false`。
-    pub fn delete(&mut self, token: &str) -> bool {
+    pub(crate) fn delete(&mut self, token: &str) -> bool {
         let before = self.live.len();
         self.live.retain(|(t, _)| t != token);
         let removed = self.live.len() < before;
@@ -178,32 +186,32 @@ impl TokenStore {
         removed
     }
 
-    pub fn is_live(&self, token: &str) -> bool {
+    pub(crate) fn is_live(&self, token: &str) -> bool {
         self.live
             .iter()
             .any(|(t, expiry)| t == token && *expiry > Instant::now())
     }
 
-    pub fn live_tokens(&self) -> Vec<String> {
+    pub(crate) fn live_tokens(&self) -> Vec<String> {
         self.live.iter().map(|(t, _)| t.clone()).collect()
     }
 }
 
 impl MockExchange {
     /// `127.0.0.1:0` に bind し、accept ループを起動する。
-    pub async fn start() -> Self {
+    pub(crate) async fn start() -> Self {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind loopback");
         let addr = listener.local_addr().expect("local addr");
         let state = Arc::new(Mutex::new(State::default()));
-        let accept_state = state.clone();
+        let accept_state = Arc::clone(&state);
         let accept_loop = tokio::spawn(async move {
             loop {
                 let Ok((socket, _)) = listener.accept().await else {
                     continue;
                 };
-                tokio::spawn(serve(socket, accept_state.clone()));
+                tokio::spawn(serve(socket, Arc::clone(&accept_state)));
             }
         });
         Self {
@@ -213,25 +221,25 @@ impl MockExchange {
         }
     }
 
-    pub fn addr(&self) -> SocketAddr {
+    pub(crate) fn addr(&self) -> SocketAddr {
         self.addr
     }
 
-    pub fn endpoints(&self) -> Endpoints {
+    pub(crate) fn endpoints(&self) -> Endpoints {
         Endpoints::loopback(self.addr).expect("mock binds loopback")
     }
 
     /// このモックを指す、既定設定のクライアント。
-    pub fn client(&self) -> Client<Anonymous> {
+    pub(crate) fn client(&self) -> Client<Anonymous> {
         Client::new(self.endpoints(), Config::default())
     }
 
     /// このモックを指す、設定を指定したクライアント。
-    pub fn client_with(&self, config: Config) -> Client<Anonymous> {
+    pub(crate) fn client_with(&self, config: Config) -> Client<Anonymous> {
         Client::new(self.endpoints(), config)
     }
 
-    pub fn credentials() -> Credentials {
+    pub(crate) fn credentials() -> Credentials {
         Credentials::new(
             ApiKey::new(TEST_KEY.to_owned()).expect("valid key"),
             ApiSecret::new(TEST_SECRET.to_owned()).expect("valid secret"),
@@ -240,7 +248,7 @@ impl MockExchange {
 
     /// `method path` の期待を始める (パスは `/public` や `/private` の
     /// プレフィックスを含む、送られるままの形)。
-    pub fn on(&self, method: &'static str, path: &'static str) -> RouteBuilder<'_> {
+    pub(crate) fn on(&self, method: &'static str, path: &'static str) -> RouteBuilder<'_> {
         RouteBuilder {
             mock: self,
             route: Route {
@@ -256,33 +264,33 @@ impl MockExchange {
         }
     }
 
-    pub fn requests(&self) -> Vec<Recorded> {
+    pub(crate) fn requests(&self) -> Vec<Recorded> {
         self.lock().requests.clone()
     }
 
     /// これまでに受け付けた HTTP 接続の数 (WebSocket は含まない)。
-    pub fn http_connections(&self) -> usize {
+    pub(crate) fn http_connections(&self) -> usize {
         self.lock().http_connections
     }
 
-    pub fn ws(&self) -> WsControl {
-        WsControl::new(self.state.clone())
+    pub(crate) fn ws(&self) -> WsControl {
+        WsControl::new(Arc::clone(&self.state))
     }
 
     /// トークン台帳を読む (または書く)。
-    pub fn with_tokens<R>(&self, f: impl FnOnce(&mut TokenStore) -> R) -> R {
+    pub(crate) fn with_tokens<R>(&self, f: impl FnOnce(&mut TokenStore) -> R) -> R {
         f(&mut self.lock().tokens)
     }
 
     /// REST を通さずにトークンを発行する。Private WebSocket だけを試すテスト向け。
-    pub fn issue_token(&self) -> String {
+    pub(crate) fn issue_token(&self) -> String {
         self.with_tokens(TokenStore::issue)
     }
 
     /// `times(n)` のルートがちょうど n 回呼ばれ、すべてのリクエストがどれかの
     /// ルート (組み込みの `ws-auth` を含む) に一致し、署名が 1 つも無効で
     /// なかったことを確かめる。そうでなければパニックする。
-    pub fn assert_done(&self) {
+    pub(crate) fn assert_done(&self) {
         let state = self.lock();
         let mut problems = Vec::new();
         for route in &state.routes {
@@ -322,7 +330,9 @@ impl MockExchange {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(|e| e.into_inner())
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -355,60 +365,60 @@ async fn serve(socket: tokio::net::TcpStream, state: Arc<Mutex<State>>) {
     } else {
         state
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .http_connections += 1;
         http::serve(socket, state).await;
     }
 }
 
-pub struct RouteBuilder<'a> {
+pub(crate) struct RouteBuilder<'a> {
     mock: &'a MockExchange,
     route: Route,
 }
 
 impl RouteBuilder<'_> {
     /// クエリ文字列そのもの。たとえば `"symbol=BTC"`。
-    pub fn query(mut self, query: &str) -> Self {
+    pub(crate) fn query(mut self, query: &str) -> Self {
         self.route.query = Some(query.to_owned());
         self
     }
 
     /// リクエストボディはこの JSON と等しくなければならない (値として比較する
     /// のでキーの順序は問わないが、署名は生のバイト列に対して検査される)。
-    pub fn json_body(mut self, body: serde_json::Value) -> Self {
+    pub(crate) fn json_body(mut self, body: serde_json::Value) -> Self {
         self.route.json_body = Some(body);
         self
     }
 
     /// リクエストは有効な署名を持たなければならない。
-    pub fn signed(mut self) -> Self {
+    pub(crate) fn signed(mut self) -> Self {
         self.route.signed = true;
         self
     }
 
-    pub fn times(mut self, n: usize) -> Self {
+    pub(crate) fn times(mut self, n: usize) -> Self {
         self.route.times = Some(n);
         self
     }
 
-    pub fn reply(mut self, reply: Reply) {
+    pub(crate) fn reply(mut self, reply: Reply) {
         self.route.reply = reply;
         self.mock.lock().routes.push(self.route);
     }
 
-    pub fn fixture(self, name: &'static str) {
+    pub(crate) fn fixture(self, name: &'static str) {
         self.reply(Reply::Fixture(name));
     }
 }
 
 /// `tests/fixtures/<name>` を読む。
-pub fn fixture(name: &str) -> String {
+pub(crate) fn fixture(name: &str) -> String {
     let path = format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"))
 }
 
 /// 取引所自身のエラーの形。`Reply::Json` 向け。
-pub fn api_error(code: &str, text: &str) -> String {
+pub(crate) fn api_error(code: &str, text: &str) -> String {
     format!(
         r#"{{"status":1,"messages":[{{"message_code":"{code}","message_string":"{text}"}}],"responsetime":"2026-10-27T11:49:18.425Z"}}"#
     )

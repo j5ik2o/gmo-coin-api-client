@@ -1,6 +1,15 @@
 //! モック取引所に対する REST の振る舞い: 公式サンプルのデコード、署名、
 //! 部分成功、契約の検査。
 
+#![expect(
+    clippy::expect_used,
+    reason = "テストの補助関数は #[test] 関数ではないため clippy.toml の allow-*-in-tests が届かない。失敗はそのままテストの失敗になる"
+)]
+#![expect(
+    clippy::unreadable_literal,
+    reason = "公式ドキュメントの応答例から写した id と値をそのまま残す"
+)]
+
 mod support;
 
 use std::time::Duration;

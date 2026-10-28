@@ -144,16 +144,16 @@ mod tests {
 
     #[test]
     fn a_success_envelope_yields_its_data_and_missing_data_is_typed() {
+        #[derive(Debug, Deserialize)]
+        struct Data {
+            status: String,
+        }
         let answer = classify(
             200,
             r#"{"status":0,"data":{"status":"OPEN"},"responsetime":"2019-03-19T02:15:06.001Z"}"#,
         )
         .unwrap();
         assert_eq!(answer.raw(), Some(r#"{"status":"OPEN"}"#));
-        #[derive(Debug, Deserialize)]
-        struct Data {
-            status: String,
-        }
         assert_eq!(answer.data::<Data>().unwrap().status, "OPEN");
 
         let answer = classify(

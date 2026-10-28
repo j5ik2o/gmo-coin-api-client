@@ -50,6 +50,10 @@ impl Connector {
     ///
     /// # パニック
     /// ring プロバイダが TLS 1.2/1.3 を提供しない場合。ring では起きない。
+    #[expect(
+        clippy::expect_used,
+        reason = "ring プロバイダは TLS 1.2 と 1.3 を提供するので、doc の # パニック は起きない"
+    )]
     pub(crate) fn new() -> Self {
         let provider = Arc::new(tokio_rustls::rustls::crypto::ring::default_provider());
         let mut roots = RootCertStore::empty();
@@ -174,7 +178,8 @@ pub(crate) fn io_kind(e: &io::Error) -> TransportErrorKind {
 fn tls_kind(e: &io::Error) -> TransportErrorKind {
     let is_tls = e
         .get_ref()
-        .is_some_and(|inner| inner.is::<tokio_rustls::rustls::Error>());
+        .and_then(|inner| inner.downcast_ref::<tokio_rustls::rustls::Error>())
+        .is_some();
     if is_tls {
         TransportErrorKind::Tls
     } else {

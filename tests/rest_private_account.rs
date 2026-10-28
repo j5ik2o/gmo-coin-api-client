@@ -2,6 +2,11 @@
 //! 取引所が観測するリクエスト (メソッド、パス、クエリ、ボディ、署名) と、
 //! デコードされた結果を確かめる。
 
+#![expect(
+    clippy::expect_used,
+    reason = "テストの補助関数は #[test] 関数ではないため clippy.toml の allow-*-in-tests が届かない。失敗はそのままテストの失敗になる"
+)]
+
 mod support;
 
 use gmo_coin_api_client::error::{ContractViolation, Postcondition, ProtocolErrorKind};
@@ -354,7 +359,7 @@ async fn an_exchange_refusal_is_a_typed_api_error() {
 
     match err {
         Error::Api(api) => {
-            assert!(api.has(gmo_coin_api_client::error::ErrorCode::TRANSFER_OVER_TRANSFERABLE))
+            assert!(api.has(gmo_coin_api_client::error::ErrorCode::TRANSFER_OVER_TRANSFERABLE));
         }
         other => panic!("expected an API error, got {other:?}"),
     }

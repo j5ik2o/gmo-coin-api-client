@@ -509,13 +509,13 @@ impl fmt::Display for TransportError {
             TransportErrorKind::Tls => f.write_str("TLS ハンドシェイクに失敗しました")?,
             TransportErrorKind::Timeout(phase) => write!(f, "タイムアウト ({phase})")?,
             TransportErrorKind::TooLarge { limit } => {
-                write!(f, "応答が上限 {limit} バイトを超えました")?
+                write!(f, "応答が上限 {limit} バイトを超えました")?;
             }
             TransportErrorKind::Framing(what) => {
-                write!(f, "サーバのフレーミングが不正です ({what})")?
+                write!(f, "サーバのフレーミングが不正です ({what})")?;
             }
             TransportErrorKind::ClosedEarly => {
-                f.write_str("応答が完了する前に接続が閉じられました")?
+                f.write_str("応答が完了する前に接続が閉じられました")?;
             }
         }
         match self.delivery {

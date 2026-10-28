@@ -36,6 +36,10 @@ impl Endpoints {
     ///
     /// # エラー
     /// 失敗しない。
+    #[expect(
+        clippy::expect_used,
+        reason = "本番 URL は定数で、整形式であることを単体テストで確かめている"
+    )]
     pub fn production() -> Self {
         let parse = |url, scheme_tls, scheme_plain| {
             Base::parse(url, scheme_tls, scheme_plain).expect("the production URLs are well formed")
@@ -166,10 +170,10 @@ impl Base {
         let (scheme, rest) = url
             .split_once("://")
             .ok_or_else(|| syntax("missing scheme"))?;
-        let (authority, prefix) = match rest.find('/') {
-            Some(i) => (&rest[..i], &rest[i..]),
-            None => (rest, ""),
-        };
+        let (authority, prefix) = rest
+            .find('/')
+            .and_then(|i| rest.split_at_checked(i))
+            .unwrap_or((rest, ""));
         if authority.is_empty() {
             return Err(syntax("missing host"));
         }
@@ -183,7 +187,7 @@ impl Base {
                     && s.bytes()
                         .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
             };
-            if !prefix[1..].split('/').all(segment_ok) {
+            if !prefix.split('/').skip(1).all(segment_ok) {
                 return Err(syntax("prefix segment"));
             }
         }
@@ -288,7 +292,7 @@ pub(crate) enum Transport {
 }
 
 /// # 不変条件
-/// `ip.is_loopback()` (127.0.0.0/8 または ::1)。コンストラクタは非公開。
+/// `ip.is_loopback()` (`127.0.0.0/8` または `::1`)。コンストラクタは非公開。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct LoopbackIp(IpAddr);
 
