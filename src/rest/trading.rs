@@ -896,6 +896,18 @@ mod tests {
     }
 
     #[test]
+    fn a_bulk_cancel_answer_reports_the_id_whose_repeat_comes_first() {
+        assert_eq!(
+            check_bulk_cancel_ids(&ids(&[1, 2, 2, 1])),
+            Err(Postcondition::BulkCancelIdRepeated(id(2)))
+        );
+        assert_eq!(
+            check_bulk_cancel_ids(&ids(&[2, 1, 1, 2])),
+            Err(Postcondition::BulkCancelIdRepeated(id(1)))
+        );
+    }
+
+    #[test]
     fn an_empty_answer_leaves_every_sent_id_unaccounted() {
         let outcome = check_cancel_outcome(&ids(&[5, 6]), vec![], vec![]).unwrap();
         assert_eq!(outcome.unaccounted(), ids(&[5, 6]));
