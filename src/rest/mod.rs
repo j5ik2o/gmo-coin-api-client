@@ -326,6 +326,7 @@ pub struct PageRequest {
 }
 
 impl PageRequest {
+    /// 1 ページあたりの件数の上限 (100)。
     pub const MAX_COUNT: u8 = 100;
 
     /// 1 ページ目、100 件: 取引所自身の既定。
@@ -356,14 +357,17 @@ impl PageRequest {
         Ok(Self { page, count })
     }
 
+    /// 次のページを指す `PageRequest`。ページ番号を 1 進め、`count` は変えない。ページ番号が `u32` の上限なら `None`。
     pub fn next(self) -> Option<Self> {
         self.page.checked_add(1).map(|page| Self { page, ..self })
     }
 
+    /// ページ番号 (1 以上)。
     pub fn page(self) -> u32 {
         self.page.get()
     }
 
+    /// 1 ページあたりの件数 (1 から 100)。
     pub fn count(self) -> u8 {
         self.count
     }
@@ -458,10 +462,12 @@ pub struct Page<T> {
 }
 
 impl<T> Page<T> {
+    /// このページの要素。
     pub fn items(&self) -> &[T] {
         &self.items
     }
 
+    /// このページの要素を所有権ごと取り出す。
     pub fn into_items(self) -> Vec<T> {
         self.items
     }
@@ -472,10 +478,13 @@ impl<T> Page<T> {
     }
 }
 
+/// 取引所が返したページ情報 (`pagination`)。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Pagination {
+    /// 現在のページ番号。
     pub current_page: u32,
+    /// 送られたままの `pagination.count`。公式ドキュメントの応答表に説明がなく、このクレートは解釈しない。
     pub count: u32,
 }
 

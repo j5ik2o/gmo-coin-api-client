@@ -38,14 +38,23 @@ use crate::error::{Postcondition, ProtocolErrorKind, Result};
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Margin {
+    /// 時価評価総額。
     pub actual_profit_loss: Decimal,
+    /// 取引余力（代用暗号資産評価額を含む、レバレッジ取引用）。
     pub available_amount: Decimal,
+    /// 現物購入余力（代用暗号資産評価額を含まない）。
     pub available_amount_for_spot: Decimal,
+    /// 代用暗号資産不足金ステータス。
     pub crypto_shortfall_status: CryptoShortfallStatus,
+    /// 拘束証拠金。
     pub margin: Decimal,
+    /// 追証ステータス。
     pub margin_call_status: MarginCallStatus,
+    /// 証拠金維持率。
     pub margin_ratio: Decimal,
+    /// 評価損益。
     pub profit_loss: Decimal,
+    /// 振替可能額。
     pub transferable_amount: Decimal,
 }
 
@@ -53,9 +62,13 @@ pub struct Margin {
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Asset {
+    /// 資産残高の銘柄。
     pub symbol: Symbol,
+    /// 残高。
     pub amount: Amount,
+    /// 利用可能金額（残高 - 出金予定額）。
     pub available: Amount,
+    /// 円転レート。販売所での売却価格。販売所で取り扱いのない銘柄は、取引所現物での最終約定価格。
     pub conversion_rate: Price,
 }
 
@@ -63,9 +76,11 @@ pub struct Asset {
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TradingVolume {
+    /// 今週の取引高(日本円)。
     pub jpy_volume: Amount,
     /// 1、2、3 のいずれか。送られたままで、階層の表は取引所のもの。
     pub tier_level: u8,
+    /// 銘柄ごとの 1 日の取引数量の残量と手数料率。現物とレバレッジで形が違うので [`VolumeLimit`] の variant で表す。
     pub limit: Vec<VolumeLimit>,
 }
 
@@ -77,17 +92,26 @@ pub struct TradingVolume {
 pub enum VolumeLimit {
     /// `todayLimitBuySize` と `todayLimitSellSize` を持つ。
     Spot {
+        /// 取扱銘柄 (現物)。
         symbol: Symbol,
+        /// 1 日の最大取引数量の残量 (購入)。
         today_limit_buy_size: Size,
+        /// 1 日の最大取引数量の残量 (売却)。
         today_limit_sell_size: Size,
+        /// Taker 手数料。
         taker_fee: Decimal,
+        /// Maker 手数料。
         maker_fee: Decimal,
     },
     /// `todayLimitOpenSize` を持つ。銘柄はここでは `BTC/JPY` と綴られる。
     Leverage {
+        /// 取扱銘柄 (レバレッジ)。
         symbol: Symbol,
+        /// 1 日の最大取引数量の残量 (新規)。
         today_limit_open_size: Size,
+        /// Taker 手数料。
         taker_fee: Decimal,
+        /// Maker 手数料。
         maker_fee: Decimal,
     },
 }
@@ -133,10 +157,15 @@ impl<'de> Deserialize<'de> for VolumeLimit {
 /// 日本円の入金または出金の記録。
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct FiatTransfer {
+    /// 金額。
     pub amount: Amount,
+    /// 手数料。
     pub fee: Amount,
+    /// ステータス。
     pub status: TransferStatus,
+    /// 銘柄。日本円の入出金なので `JPY`。
     pub symbol: Symbol,
+    /// 完了時刻（UTC 時刻）。
     pub timestamp: Timestamp,
 }
 
@@ -144,13 +173,19 @@ pub struct FiatTransfer {
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CryptoTransfer {
+    /// アドレス。
     pub address: Box<str>,
+    /// 数量。
     pub amount: Amount,
     /// 応答の表にはあるが、サンプルにはない。
     pub fee: Option<Amount>,
+    /// ステータス。
     pub status: TransferStatus,
+    /// 取扱銘柄。
     pub symbol: Symbol,
+    /// 完了時刻（UTC 時刻）。
     pub timestamp: Timestamp,
+    /// トランザクションハッシュ。
     pub tx_hash: Box<str>,
 }
 
@@ -161,6 +196,7 @@ pub struct CryptoTransfer {
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExchangeFeePage {
+    /// 手数料と返金の明細。新しい順。
     pub list: Vec<ExchangeFee>,
     /// 口座の初回の日次処理が終わるまでは存在しない。
     pub last_finalized_date: Option<BusinessDate>,
@@ -182,12 +218,17 @@ struct CursorField {
     cursor: Option<Box<str>>,
 }
 
+/// `GET /account/exchangeFee/history` の `list` の 1 件。レバレッジ手数料または取引手数料の返金の明細。
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExchangeFee {
+    /// 手数料が発生した取引の銘柄。現物取引は `BTC` など、レバレッジ取引は `BTC_JPY` など。
     pub symbol: Symbol,
+    /// 手数料種別。
     pub fee_type: FeeType,
+    /// 対象営業日（YYYYMMDD）。
     pub delivery_date: BusinessDate,
+    /// 計上日時（UTC 時刻）。
     pub delivery_datetime: Timestamp,
     /// 日本円。返金は正、徴収は負。
     pub delivery_amount: Decimal,
