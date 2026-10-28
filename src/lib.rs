@@ -48,8 +48,6 @@
 //! - 平文の `http`/`ws` はループバック IP リテラルに対してだけ受け付ける。
 //! - REST の呼び出しは絞らない。ERR-5003 は `Error::is_rate_limited` で見える。
 
-#![forbid(unsafe_code)]
-
 mod client;
 mod domain;
 mod endpoint;
