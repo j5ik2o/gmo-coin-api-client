@@ -36,6 +36,7 @@ pub struct Decimal {
 impl Decimal {
     /// 段階 1 の上限。38 桁と符号と小数点が余裕を持って収まる。
     pub const MAX_LEN: usize = 48;
+    /// 小数部の桁数 (スケール) の上限。
     pub const MAX_SCALE: u8 = 30;
     /// 有効桁数の上限。`10^38 < i128::MAX` なので仮数は常に収まる。
     pub const MAX_DIGITS: u32 = 38;
@@ -109,18 +110,22 @@ impl Decimal {
         Ok(Self { mantissa, scale })
     }
 
+    /// 仮数。値は `mantissa` に 10 の `-scale` 乗を掛けたものである。
     pub const fn mantissa(self) -> i128 {
         self.mantissa
     }
 
+    /// 小数部の桁数。末尾のゼロも数える。
     pub const fn scale(self) -> u8 {
         self.scale
     }
 
+    /// 負であるか。
     pub const fn is_negative(self) -> bool {
         self.mantissa < 0
     }
 
+    /// ゼロであるか。
     pub const fn is_zero(self) -> bool {
         self.mantissa == 0
     }
@@ -264,6 +269,7 @@ macro_rules! non_negative_decimal {
                 Ok(Self(value))
             }
 
+            /// 内側の [`Decimal`] を返す。常に 0 以上である。
             pub const fn get(self) -> Decimal {
                 self.0
             }
@@ -366,6 +372,7 @@ macro_rules! positive_decimal {
                 Ok(Self(value))
             }
 
+            /// 内側の値を返す。常にゼロでない。
             pub const fn get(self) -> $inner {
                 self.0
             }

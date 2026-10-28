@@ -147,10 +147,12 @@ impl Timestamp {
         Ok(Self { unix_nanos })
     }
 
+    /// `SystemTime` に変換する。
     pub fn to_system_time(self) -> SystemTime {
         SystemTime::UNIX_EPOCH + Duration::from_nanos(self.unix_nanos.cast_unsigned())
     }
 
+    /// Unix エポックからのミリ秒。ミリ秒未満は切り捨てる。
     pub const fn unix_millis(self) -> i64 {
         self.unix_nanos / NANOS_PER_MILLI
     }
@@ -368,6 +370,7 @@ pub struct HistoryWindow {
 }
 
 impl HistoryWindow {
+    /// 窓の幅の上限 (30 分)。
     pub const MAX_SPAN: Duration = Duration::from_mins(30);
 
     /// `from` から始まり、取引所の既定 (30 分) で閉じる窓。
@@ -406,10 +409,12 @@ impl HistoryWindow {
         }
     }
 
+    /// 窓の開始時刻。
     pub fn from(&self) -> Timestamp {
         self.from
     }
 
+    /// 窓の終了時刻。`None` なら取引所が `from + 30 分` を適用する。
     pub fn to(&self) -> Option<Timestamp> {
         self.to
     }
@@ -428,6 +433,7 @@ pub struct BusinessDateRange {
 }
 
 impl BusinessDateRange {
+    /// 範囲の幅の上限 (7 日)。
     pub const MAX_DAYS: i64 = 7;
 
     /// 営業日 1 日。
@@ -469,10 +475,12 @@ impl BusinessDateRange {
         }
     }
 
+    /// 範囲の開始日。
     pub fn from(&self) -> BusinessDate {
         self.from
     }
 
+    /// 範囲の終了日。`None` なら営業日 1 日分である。
     pub fn to(&self) -> Option<BusinessDate> {
         self.to
     }
@@ -485,34 +493,56 @@ impl BusinessDateRange {
 pub enum KlineSpan {
     /// 営業日 1 日分の `1min 5min 10min 15min 30min 1hour`。
     Day {
+        /// 分と時間の足の種類。
         interval: IntradayInterval,
+        /// 対象の営業日。
         date: BusinessDate,
     },
     /// 1 年分の `4hour 8hour 12hour 1day 1week 1month`。
-    Year { interval: LongInterval, year: u16 },
+    Year {
+        /// 4 時間以上の足の種類。
+        interval: LongInterval,
+        /// 対象の年 (`YYYY`)。
+        year: u16,
+    },
 }
 
+/// 営業日 1 日分の kline で選べる足の種類 (`KlineSpan::Day`)。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IntradayInterval {
+    /// 1 分足。
     Min1,
+    /// 5 分足。
     Min5,
+    /// 10 分足。
     Min10,
+    /// 15 分足。
     Min15,
+    /// 30 分足。
     Min30,
+    /// 1 時間足。
     Hour1,
 }
 
+/// 1 年分の kline で選べる足の種類 (`KlineSpan::Year`)。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LongInterval {
+    /// 4 時間足。
     Hour4,
+    /// 8 時間足。
     Hour8,
+    /// 12 時間足。
     Hour12,
+    /// 日足。
     Day1,
+    /// 週足。
     Week1,
+    /// 月足。
     Month1,
 }
 
 impl IntradayInterval {
+    /// ワイヤ上の文字列 (`1min`、`1hour` など)。
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Min1 => "1min",
@@ -526,6 +556,7 @@ impl IntradayInterval {
 }
 
 impl LongInterval {
+    /// ワイヤ上の文字列 (`4hour`、`1month` など)。
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Hour4 => "4hour",

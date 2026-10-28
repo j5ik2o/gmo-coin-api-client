@@ -58,6 +58,7 @@ macro_rules! numeric_id {
                 Self::new(value)
             }
 
+            /// id の数値を返す。常に 1 以上である。
             pub const fn get(self) -> u64 {
                 self.0.get()
             }
@@ -146,6 +147,7 @@ pub struct ClientOrderId {
 }
 
 impl ClientOrderId {
+    /// 文字列の最大バイト数。
     pub const MAX_LEN: usize = 36;
 
     /// 呼び出し側自身の id から構築する。
@@ -203,6 +205,7 @@ impl ClientOrderId {
         Self { len: 32, bytes }
     }
 
+    /// id の文字列を返す。
     pub fn as_str(&self) -> &str {
         core::str::from_utf8(self.bytes.get(..usize::from(self.len)).unwrap_or_default())
             .unwrap_or_default()
@@ -308,10 +311,12 @@ impl<T: Eq, const MAX: usize> Batch<T, MAX> {
         Self { items: vec![item] }
     }
 
+    /// 要素を、構築時に渡された順序のスライスで返す。
     pub fn as_slice(&self) -> &[T] {
         &self.items
     }
 
+    /// `item` と等しい要素を含むか。
     pub fn contains(&self, item: &T) -> bool {
         self.items.contains(item)
     }

@@ -37,37 +37,68 @@ pub enum Market {
 }
 
 impl Symbol {
+    /// 銘柄の最大バイト数。
     pub const MAX_LEN: usize = 31;
 
+    /// 現物銘柄 `BTC`。
     pub const BTC: Symbol = Symbol::from_static("BTC");
+    /// 現物銘柄 `ETH`。
     pub const ETH: Symbol = Symbol::from_static("ETH");
+    /// 現物銘柄 `BCH`。
     pub const BCH: Symbol = Symbol::from_static("BCH");
+    /// 現物銘柄 `LTC`。
     pub const LTC: Symbol = Symbol::from_static("LTC");
+    /// 現物銘柄 `XRP`。
     pub const XRP: Symbol = Symbol::from_static("XRP");
+    /// 現物銘柄 `XLM`。
     pub const XLM: Symbol = Symbol::from_static("XLM");
+    /// 現物銘柄 `DOT`。
     pub const DOT: Symbol = Symbol::from_static("DOT");
+    /// 現物銘柄 `ATOM`。
     pub const ATOM: Symbol = Symbol::from_static("ATOM");
+    /// 現物銘柄 `FCR`。
     pub const FCR: Symbol = Symbol::from_static("FCR");
+    /// 現物銘柄 `ADA`。
     pub const ADA: Symbol = Symbol::from_static("ADA");
+    /// 現物銘柄 `LINK`。
     pub const LINK: Symbol = Symbol::from_static("LINK");
+    /// 現物銘柄 `DOGE`。
     pub const DOGE: Symbol = Symbol::from_static("DOGE");
+    /// 現物銘柄 `SOL`。
     pub const SOL: Symbol = Symbol::from_static("SOL");
+    /// 現物銘柄 `ASTR`。
     pub const ASTR: Symbol = Symbol::from_static("ASTR");
+    /// 現物銘柄 `NAC`。
     pub const NAC: Symbol = Symbol::from_static("NAC");
+    /// 現物銘柄 `SUI`。
     pub const SUI: Symbol = Symbol::from_static("SUI");
+    /// 現物銘柄 `WILD`。
     pub const WILD: Symbol = Symbol::from_static("WILD");
+    /// 日本円 (`JPY`)。資産残高などで使う。
     pub const JPY: Symbol = Symbol::from_static("JPY");
+    /// レバレッジ銘柄 `BTC_JPY`。
     pub const BTC_JPY: Symbol = Symbol::from_static("BTC_JPY");
+    /// レバレッジ銘柄 `ETH_JPY`。
     pub const ETH_JPY: Symbol = Symbol::from_static("ETH_JPY");
+    /// レバレッジ銘柄 `BCH_JPY`。
     pub const BCH_JPY: Symbol = Symbol::from_static("BCH_JPY");
+    /// レバレッジ銘柄 `LTC_JPY`。
     pub const LTC_JPY: Symbol = Symbol::from_static("LTC_JPY");
+    /// レバレッジ銘柄 `XRP_JPY`。
     pub const XRP_JPY: Symbol = Symbol::from_static("XRP_JPY");
+    /// レバレッジ銘柄 `DOT_JPY`。
     pub const DOT_JPY: Symbol = Symbol::from_static("DOT_JPY");
+    /// レバレッジ銘柄 `ATOM_JPY`。
     pub const ATOM_JPY: Symbol = Symbol::from_static("ATOM_JPY");
+    /// レバレッジ銘柄 `ADA_JPY`。
     pub const ADA_JPY: Symbol = Symbol::from_static("ADA_JPY");
+    /// レバレッジ銘柄 `LINK_JPY`。
     pub const LINK_JPY: Symbol = Symbol::from_static("LINK_JPY");
+    /// レバレッジ銘柄 `DOGE_JPY`。
     pub const DOGE_JPY: Symbol = Symbol::from_static("DOGE_JPY");
+    /// レバレッジ銘柄 `SOL_JPY`。
     pub const SOL_JPY: Symbol = Symbol::from_static("SOL_JPY");
+    /// レバレッジ銘柄 `SUI_JPY`。
     pub const SUI_JPY: Symbol = Symbol::from_static("SUI_JPY");
 
     /// 定数用のコンパイル時コンストラクタ。不正なリテラルは実行時検査ではなく
@@ -125,6 +156,7 @@ impl Symbol {
         Ok(Symbol { len, bytes })
     }
 
+    /// 取引所の綴りをそのまま返す。
     pub fn as_str(&self) -> &str {
         let used = self.bytes.get(..usize::from(self.len)).unwrap_or_default();
         debug_assert!(used.is_ascii(), "Symbol::parse admits ASCII only");
