@@ -6,6 +6,17 @@
 //! `commands_stay_one_second_apart_*` だけで、他のテストは
 //! `unpaced_ws_commands_for_loopback` で待ち時間を省く。
 
+#![expect(
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::unwrap_used,
+    reason = "テストの補助関数は #[test] 関数ではないため clippy.toml の allow-*-in-tests が届かない。失敗はそのままテストの失敗になる"
+)]
+#![expect(
+    clippy::assert_is_empty,
+    reason = "空かどうかを見る意図を is_empty で直接書く。assert_eq! に直すと空配列の型注釈が要り、読みにくくなる"
+)]
+
 mod support;
 
 use std::time::{Duration, Instant};
@@ -15,7 +26,8 @@ use gmo_coin_api_client::ws::{
     DisconnectReason, PrivateChannel, PrivateEvent, PublicChannel, PublicEvent,
 };
 use gmo_coin_api_client::{Anonymous, Backoff, Client, Config, Error, Symbol, Timeout};
-use support::{Api, MockExchange, Reply, api_error, fixture};
+use support::ws::Api;
+use support::{MockExchange, Reply, api_error, fixture};
 
 const WAIT: Duration = Duration::from_secs(5);
 
@@ -403,10 +415,7 @@ async fn an_undecodable_message_on_a_subscribed_channel_ends_the_feed() {
     let (mut feed, event) = driver.await.unwrap();
     match event {
         Err(Error::Protocol(p)) => assert!(
-            matches!(
-                p.kind(),
-                gmo_coin_api_client::error::ProtocolErrorKind::WsMessage { .. }
-            ),
+            matches!(p.kind(), ProtocolErrorKind::WsMessage { .. }),
             "{p:?}"
         ),
         other => panic!("{other:?}"),

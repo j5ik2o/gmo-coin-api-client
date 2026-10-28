@@ -25,7 +25,7 @@ use super::State;
 
 /// 開いている接続と、それらに送られたもの。モックの `State` の中にある。
 #[derive(Default)]
-pub struct Hub {
+pub(super) struct Hub {
     /// 受信したすべてのコマンド。到着時刻、API、接続 id、本文。
     pub commands: Vec<(Instant, Api, u64, Value)>,
     conns: Vec<Conn>,
@@ -60,13 +60,13 @@ enum Outgoing {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Api {
+pub(crate) enum Api {
     Public,
     Private,
 }
 
 /// モックの WebSocket エンドポイントに対する、テスト側の制御ハンドル。
-pub struct WsControl {
+pub(crate) struct WsControl {
     state: Arc<Mutex<State>>,
 }
 
@@ -76,12 +76,14 @@ impl WsControl {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(|e| e.into_inner())
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// `api` の最新の接続で `channel` (と、指定があれば `symbol`) の subscribe が
     /// 届くまで (最長 `within`) 待ち、それを返す。
-    pub async fn subscribed(
+    pub(crate) async fn subscribed(
         &self,
         api: Api,
         channel: &str,
@@ -121,7 +123,7 @@ impl WsControl {
     }
 
     /// `api` の開いているすべての接続にテキストフレームを送る。
-    pub fn push(&self, api: Api, json: &str) {
+    pub(crate) fn push(&self, api: Api, json: &str) {
         for conn in self.lock().ws.conns.iter().filter(|c| c.api == api) {
             let _ = conn.tx.send(Outgoing::Text(json.to_owned()));
         }
@@ -129,7 +131,7 @@ impl WsControl {
 
     /// `api` の開いているすべての接続を close フレームなしで閉じる。
     /// クライアントからはネットワークの切断に見える。
-    pub fn drop_connections(&self, api: Api) {
+    pub(crate) fn drop_connections(&self, api: Api) {
         for conn in self.lock().ws.conns.iter().filter(|c| c.api == api) {
             let _ = conn.tx.send(Outgoing::Drop);
         }
@@ -137,19 +139,19 @@ impl WsControl {
 
     /// `api` の開いているすべての接続に正常終了 (1000) の close フレームを
     /// 送る。クライアントの返答は `closes_received` に数えられる。
-    pub fn close_connections(&self, api: Api) {
+    pub(crate) fn close_connections(&self, api: Api) {
         for conn in self.lock().ws.conns.iter().filter(|c| c.api == api) {
             let _ = conn.tx.send(Outgoing::Close);
         }
     }
 
     /// クライアントから受け取った close フレームの数。
-    pub fn closes_received(&self) -> usize {
+    pub(crate) fn closes_received(&self) -> usize {
         self.lock().ws.closes_received
     }
 
     /// ping を送り、`within` 以内に pong が返ったかを返す。
-    pub async fn ping(&self, api: Api, within: Duration) -> bool {
+    pub(crate) async fn ping(&self, api: Api, within: Duration) -> bool {
         let before = {
             let st = self.lock();
             let conns: Vec<_> = st.ws.conns.iter().filter(|c| c.api == api).collect();
@@ -172,7 +174,7 @@ impl WsControl {
     }
 
     /// これまでに受信したすべてのコマンド。到着順。
-    pub fn commands(&self) -> Vec<(Instant, Api, Value)> {
+    pub(crate) fn commands(&self) -> Vec<(Instant, Api, Value)> {
         self.lock()
             .ws
             .commands
@@ -182,7 +184,7 @@ impl WsControl {
     }
 
     /// `api` で完了したハンドシェイクの数。再接続の検証に使う。
-    pub fn handshakes(&self, api: Api) -> usize {
+    pub(crate) fn handshakes(&self, api: Api) -> usize {
         self.lock()
             .ws
             .handshakes
@@ -192,18 +194,18 @@ impl WsControl {
     }
 
     /// `api` の開いている接続数。
-    pub fn open_connections(&self, api: Api) -> usize {
+    pub(crate) fn open_connections(&self, api: Api) -> usize {
         self.lock().ws.conns.iter().filter(|c| c.api == api).count()
     }
 
     /// `true` の間、すべてのハンドシェイクを HTTP 503 で拒否する。
-    pub fn set_maintenance(&self, on: bool) {
+    pub(crate) fn set_maintenance(&self, on: bool) {
         self.lock().ws.maintenance = on;
     }
 
     /// 以後、`api` で `channel` への subscribe が届くたびに、記録した上で
     /// `{"error": text}` を返す。本番で観測した拒否の形と同じ。
-    pub fn reject_subscribe(&self, api: Api, channel: &str, text: &str) {
+    pub(crate) fn reject_subscribe(&self, api: Api, channel: &str, text: &str) {
         self.lock()
             .ws
             .rejections
@@ -212,18 +214,23 @@ impl WsControl {
 
     /// `Some(status)` の間、Private のハンドシェイクをトークンの生死に
     /// 関係なくその HTTP 状態で拒否する。`None` で元に戻す。
-    pub fn reject_private_handshakes(&self, status: Option<u16>) {
+    pub(crate) fn reject_private_handshakes(&self, status: Option<u16>) {
         self.lock().ws.reject_private = status;
     }
 }
 
 /// アップグレード要求を 1 本処理する。
-// tungstenite の `Callback` は `Result<Response, ErrorResponse>` を要求する。
-#[allow(clippy::result_large_err)]
-pub async fn serve(socket: TcpStream, state: Arc<Mutex<State>>) {
+#[expect(
+    clippy::result_large_err,
+    clippy::too_many_lines,
+    reason = "tungstenite の `Callback` は `Result<Response, ErrorResponse>` を要求する。1 接続の入出力を 1 つの select! ループで扱うので分けない"
+)]
+pub(super) async fn serve(socket: TcpStream, state: Arc<Mutex<State>>) {
     let mut api = None;
     let callback = |req: &Request, resp: Response| -> Result<Response, ErrorResponse> {
-        let st = state.lock().unwrap_or_else(|e| e.into_inner());
+        let st = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let reject = |code: u16| {
             let mut r = ErrorResponse::new(Some(format!("mock rejected the upgrade with {code}")));
             *r.status_mut() = http::StatusCode::from_u16(code).expect("valid status");
@@ -255,7 +262,9 @@ pub async fn serve(socket: TcpStream, state: Arc<Mutex<State>>) {
     let api = api.expect("set by the callback on success");
     let (tx, mut rx) = mpsc::unbounded_channel();
     let id = {
-        let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut st = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         st.ws.next_id += 1;
         let id = st.ws.next_id;
         st.ws.conns.push(Conn { id, api, tx });
@@ -268,7 +277,7 @@ pub async fn serve(socket: TcpStream, state: Arc<Mutex<State>>) {
                 Some(Ok(Message::Text(text))) => {
                     if let Ok(value) = serde_json::from_str::<Value>(&text) {
                         let rejection = {
-                            let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
+                            let mut st = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                             let rejection = st.ws.rejections.iter().find(|(a, channel, _)| {
                                 *a == api && value["command"] == "subscribe" && value["channel"] == channel.as_str()
                             }).map(|(_, _, text)| serde_json::json!({"error": text}).to_string());
@@ -280,9 +289,9 @@ pub async fn serve(socket: TcpStream, state: Arc<Mutex<State>>) {
                         }
                     }
                 }
-                Some(Ok(Message::Pong(_))) => state.lock().unwrap_or_else(|e| e.into_inner()).ws.pongs += 1,
+                Some(Ok(Message::Pong(_))) => state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).ws.pongs += 1,
                 Some(Ok(Message::Close(_))) => {
-                    state.lock().unwrap_or_else(|e| e.into_inner()).ws.closes_received += 1;
+                    state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).ws.closes_received += 1;
                     // tungstenite は受信した close への返答を積むだけなので、
                     // 捨てる前に flush して返答を書き出す (RFC 6455 のエコー)。
                     let _ = ws.flush().await;
@@ -318,7 +327,7 @@ pub async fn serve(socket: TcpStream, state: Arc<Mutex<State>>) {
     drop(ws);
     state
         .lock()
-        .unwrap_or_else(|e| e.into_inner())
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .ws
         .conns
         .retain(|c| c.id != id);

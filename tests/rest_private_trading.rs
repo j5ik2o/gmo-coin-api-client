@@ -2,6 +2,21 @@
 //! 試す。取引所が観測するリクエストと、デコードされた結果、契約違反で何も
 //! 送られないこと、事後条件の検査を確かめる。
 
+#![expect(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    reason = "テストの補助関数は #[test] 関数ではないため clippy.toml の allow-*-in-tests が届かない。失敗はそのままテストの失敗になる"
+)]
+#![expect(
+    clippy::unreadable_literal,
+    reason = "公式ドキュメントの応答例から写した id と値をそのまま残す"
+)]
+#![expect(
+    clippy::assert_is_empty,
+    reason = "空かどうかを見る意図を is_empty で直接書く。assert_eq! に直すと空配列の型注釈が要り、読みにくくなる"
+)]
+
 mod support;
 
 use std::time::Duration;
@@ -55,6 +70,10 @@ fn limit_buy(symbol: Symbol) -> NewOrder {
     }
 }
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "各テストが期待値をその場で組み立てて渡す形を保つ"
+)]
 fn assert_contract(err: Error, expected: ContractViolation) {
     match err {
         Error::Contract(v) => assert_eq!(v, expected),
@@ -246,6 +265,10 @@ fn execution_json(
     execution
 }
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "各テストが期待値をその場で組み立てて渡す形を保つ"
+)]
 fn executions_reply(list: Vec<serde_json::Value>) -> Reply {
     Reply::Json(json!({"status": 0, "data": {"list": list}}).to_string())
 }

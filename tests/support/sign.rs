@@ -6,14 +6,14 @@ use super::{SignatureCheck, TEST_KEY, TEST_SECRET, TIMESTAMP_WINDOW};
 
 /// 1 リクエスト分の認証ヘッダ。
 #[derive(Clone, Copy, Default)]
-pub struct AuthHeaders<'a> {
+pub(crate) struct AuthHeaders<'a> {
     pub key: Option<&'a str>,
     pub timestamp: Option<&'a str>,
     pub sign: Option<&'a str>,
 }
 
 impl AuthHeaders<'_> {
-    pub fn is_absent(&self) -> bool {
+    pub(crate) fn is_absent(&self) -> bool {
         self.key.is_none() && self.timestamp.is_none() && self.sign.is_none()
     }
 }
@@ -30,7 +30,7 @@ impl AuthHeaders<'_> {
 /// `/private` プレフィックスとクエリを落としたもの。`body` は受信した生の
 /// バイト列であり、再シリアライズではない。したがって、あるバイト列に署名して
 /// 別のバイト列を送るクライアントはここで失敗する。
-pub fn check(
+pub(crate) fn check(
     now_ms: u64,
     headers: AuthHeaders<'_>,
     method: &str,
@@ -67,7 +67,10 @@ pub fn check(
 }
 
 /// `check` の結果を記録用の 3 値にまとめる。
-pub fn classify(headers: AuthHeaders<'_>, outcome: &Result<(), &'static str>) -> SignatureCheck {
+pub(crate) fn classify(
+    headers: AuthHeaders<'_>,
+    outcome: &Result<(), &'static str>,
+) -> SignatureCheck {
     if headers.is_absent() {
         SignatureCheck::Absent
     } else if outcome.is_ok() {
@@ -88,7 +91,7 @@ fn decode_hex(text: &str) -> Option<Vec<u8>> {
 }
 
 /// 現在時刻のミリ秒 Unix 時刻。
-pub fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     u64::try_from(
         std::time::SystemTime::now()
             .duration_since(std::time::SystemTime::UNIX_EPOCH)

@@ -1,13 +1,20 @@
 //! モック取引所そのものの振る舞い。WebSocket 側は tokio-tungstenite を
 //! クライアントとして直接使って確かめる。
 
+#![expect(
+    clippy::expect_used,
+    reason = "テストの補助関数は #[test] 関数ではないため clippy.toml の allow-*-in-tests が届かない。失敗はそのままテストの失敗になる"
+)]
+
 mod support;
 
+use std::fmt::Write as _;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use support::sign::{self, AuthHeaders};
-use support::{Api, MockExchange, SignatureCheck, TEST_KEY, TEST_SECRET, TokenStore};
+use support::ws::Api;
+use support::{MockExchange, SignatureCheck, TEST_KEY, TEST_SECRET, TokenStore};
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Error as WsError;
 use tokio_tungstenite::tungstenite::Message;
@@ -273,7 +280,10 @@ async fn a_dropped_connection_still_records_the_real_signature_result() {
 fn hmac_hex(ts: &str, method: &str, path: &str, body: &str) -> String {
     let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, TEST_SECRET.as_bytes());
     let tag = ring::hmac::sign(&key, format!("{ts}{method}{path}{body}").as_bytes());
-    tag.as_ref().iter().map(|b| format!("{b:02x}")).collect()
+    tag.as_ref().iter().fold(String::new(), |mut hex, b| {
+        let _ = write!(hex, "{b:02x}");
+        hex
+    })
 }
 
 #[test]

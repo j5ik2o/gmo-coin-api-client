@@ -43,8 +43,8 @@ impl std::fmt::Display for Dropped {
 
 impl std::error::Error for Dropped {}
 
-pub async fn serve(socket: TcpStream, state: Arc<Mutex<State>>) {
-    let service = service_fn(move |req| handle(req, state.clone()));
+pub(super) async fn serve(socket: TcpStream, state: Arc<Mutex<State>>) {
+    let service = service_fn(move |req| handle(req, Arc::clone(&state)));
     let _ = hyper::server::conn::http1::Builder::new()
         .keep_alive(true)
         .serve_connection(TokioIo::new(socket), service)
@@ -91,7 +91,9 @@ async fn handle(
     let signature = sign::classify(headers, &auth);
 
     let reply = {
-        let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut st = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         st.requests.push(Recorded {
             method: method.clone(),
             path: path.clone(),

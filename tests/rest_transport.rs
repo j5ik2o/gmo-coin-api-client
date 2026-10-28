@@ -3,6 +3,17 @@
 //! `Connection: close` を付けずに黙って閉じる」という本番のロードバランサの
 //! 振る舞いを作れない。
 
+#![expect(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    reason = "テストの補助関数は #[test] 関数ではないため clippy.toml の allow-*-in-tests が届かない。失敗はそのままテストの失敗になる"
+)]
+#![expect(
+    clippy::unreadable_literal,
+    reason = "公式ドキュメントの応答例から写した id と値をそのまま残す"
+)]
+
 mod support;
 
 use std::io::{Read, Write};
@@ -70,9 +81,8 @@ fn read_request(stream: &mut TcpStream) -> Received {
             k.eq_ignore_ascii_case(name).then(|| v.trim().to_owned())
         })
     };
-    let content_length: usize = header("content-length")
-        .map(|v| v.parse().expect("numeric content-length"))
-        .unwrap_or(0);
+    let content_length: usize =
+        header("content-length").map_or(0, |v| v.parse().expect("numeric content-length"));
     let body_start = head_end + 4;
     while buf.len() < body_start + content_length {
         let n = stream.read(&mut chunk).expect("read body");
