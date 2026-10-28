@@ -147,6 +147,22 @@ pub(crate) fn check_size_and_lexical(
 /// エスケープ済みでも) を受け取り、そのプリミティブ自身のコンストラクタを
 /// 走らせる。他の JSON 型は強制変換せず拒否する (フェイルクローズド)。
 /// serde のエラーにはプリミティブ名と失敗段階だけが入り、値は入らない。
+/// `data` を小文字の 16 進数にして `out` の先頭から書く。`out` が `2 * data.len()`
+/// バイトより短ければ入る分だけ書き、長ければ残りは触らない。
+pub(crate) fn write_hex(out: &mut [u8], data: &[u8]) {
+    fn digit(nibble: u8) -> u8 {
+        if nibble < 10 {
+            b'0' + nibble
+        } else {
+            b'a' + (nibble - 10)
+        }
+    }
+    let (pairs, _) = out.as_chunks_mut::<2>();
+    for (pair, byte) in pairs.iter_mut().zip(data) {
+        *pair = [digit(byte >> 4), digit(byte & 0x0f)];
+    }
+}
+
 pub(crate) fn deserialize_text<'de, D, T>(
     d: D,
     parse: fn(&str) -> Result<T, InvalidValue>,
@@ -155,7 +171,7 @@ where
     D: serde::Deserializer<'de>,
 {
     struct Text<T>(fn(&str) -> Result<T, InvalidValue>);
-    impl<'de, T> serde::de::Visitor<'de> for Text<T> {
+    impl<T> serde::de::Visitor<'_> for Text<T> {
         type Value = T;
         fn expecting(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
             f.write_str("a JSON string")

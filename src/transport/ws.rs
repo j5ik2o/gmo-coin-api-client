@@ -86,10 +86,9 @@ pub(crate) fn error_kind(e: &WsError, limits: &Limits) -> TransportErrorKind {
         WsError::Capacity(_) => TransportErrorKind::TooLarge {
             limit: limits.max_ws_message_bytes.get(),
         },
-        WsError::Protocol(_) => TransportErrorKind::Framing("websocket"),
+        WsError::Protocol(_) | WsError::AttackAttempt => TransportErrorKind::Framing("websocket"),
         WsError::WriteBufferFull(_) => TransportErrorKind::Framing("websocket write buffer"),
         WsError::Utf8(_) => TransportErrorKind::Framing("utf-8"),
-        WsError::AttackAttempt => TransportErrorKind::Framing("websocket"),
         WsError::Url(_) => TransportErrorKind::Framing("websocket uri"),
         WsError::Http(response) => {
             TransportErrorKind::Framing(if response.status().is_server_error() {

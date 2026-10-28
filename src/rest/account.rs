@@ -18,6 +18,7 @@
 //! # Ok(()) }
 //! ```
 
+use core::fmt::Write as _;
 use serde::{Deserialize, Serialize};
 
 use super::{Call, endpoint};
@@ -201,7 +202,7 @@ fn percent_encode(text: &str) -> String {
         if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
             out.push(char::from(b));
         } else {
-            out.push_str(&format!("%{b:02X}"));
+            let _ = write!(out, "%{b:02X}");
         }
     }
     out

@@ -55,32 +55,35 @@ impl Timestamp {
         };
         let syntax = |why| invalid(Violation::Syntax(why));
         let b = text.as_bytes();
-        let layout_ok = b[4] == b'-'
-            && b[7] == b'-'
-            && b[10] == b'T'
-            && b[13] == b':'
-            && b[16] == b':'
-            && b[b.len() - 1] == b'Z'
-            && [0..4, 5..7, 8..10, 11..13, 14..16, 17..19]
-                .into_iter()
-                .all(|r| b[r].iter().all(u8::is_ascii_digit));
-        if !layout_ok {
+        let at = |i: usize| b.get(i).copied();
+        let field = |r: core::ops::Range<usize>| b.get(r).and_then(parse_digits);
+        let layout_ok = at(4) == Some(b'-')
+            && at(7) == Some(b'-')
+            && at(10) == Some(b'T')
+            && at(13) == Some(b':')
+            && at(16) == Some(b':');
+        let fraction = b.get(19..).and_then(|rest| rest.strip_suffix(b"Z"));
+        let (true, Some(fraction), Some(year), Some(month), Some(day)) =
+            (layout_ok, fraction, field(0..4), field(5..7), field(8..10))
+        else {
             return Err(syntax("expected YYYY-MM-DDTHH:MM:SS[.f]Z"));
-        }
-        let fraction = &b[19..b.len() - 1];
+        };
+        let (Some(hour), Some(minute), Some(second)) =
+            (field(11..13), field(14..16), field(17..19))
+        else {
+            return Err(syntax("expected YYYY-MM-DDTHH:MM:SS[.f]Z"));
+        };
         let fraction_nanos = match fraction {
             [] => 0,
             [b'.', digits @ ..] if !digits.is_empty() && digits.iter().all(u8::is_ascii_digit) => {
                 digits
                     .iter()
+                    .chain(core::iter::repeat(&b'0'))
+                    .take(9)
                     .fold(0i64, |acc, d| acc * 10 + i64::from(d - b'0'))
-                    * 10i64.pow(9 - digits.len() as u32)
             }
             _ => return Err(syntax("fraction must be '.' followed by 1 to 9 digits")),
         };
-        let field = |r: core::ops::Range<usize>| text[r].parse::<u32>().unwrap_or(u32::MAX);
-        let (year, month, day) = (field(0..4), field(5..7), field(8..10));
-        let (hour, minute, second) = (field(11..13), field(14..16), field(17..19));
         if hour > 23 || minute > 59 || second > 59 {
             return Err(invalid(Violation::Semantics("no such time of day")));
         }
@@ -145,7 +148,7 @@ impl Timestamp {
     }
 
     pub fn to_system_time(self) -> SystemTime {
-        SystemTime::UNIX_EPOCH + Duration::from_nanos(self.unix_nanos as u64)
+        SystemTime::UNIX_EPOCH + Duration::from_nanos(self.unix_nanos.cast_unsigned())
     }
 
     pub const fn unix_millis(self) -> i64 {
@@ -208,6 +211,17 @@ impl<'de> Deserialize<'de> for Timestamp {
 
 /// 1970-01-01 からの日数 (Howard Hinnant の `days_from_civil`、整数演算のみ)。
 /// 暦として存在しない日付には `None`。
+/// ASCII 数字だけの並びを数値にする。空、数字以外、桁あふれは `None`。
+fn parse_digits(digits: &[u8]) -> Option<u32> {
+    if digits.is_empty() {
+        return None;
+    }
+    digits.iter().try_fold(0u32, |acc, d| {
+        let digit = char::from(*d).to_digit(10)?;
+        acc.checked_mul(10)?.checked_add(digit)
+    })
+}
+
 fn days_from_civil(year: u32, month: u32, day: u32) -> Option<i64> {
     if !(1..=12).contains(&month) || day == 0 || day > days_in_month(year, month) {
         return None;
@@ -296,7 +310,13 @@ impl BusinessDate {
     /// `Size` (8 バイトでない)、`Lexical` (数字以外)、`Semantics` (存在しない日)。
     pub fn parse(text: &str) -> Result<Self, InvalidValue> {
         check_size_and_lexical(Primitive::BusinessDate, text, 8, 8, |b| b.is_ascii_digit())?;
-        let number = |r: core::ops::Range<usize>| text[r].parse::<u16>().unwrap_or(u16::MAX);
+        let number = |r: core::ops::Range<usize>| {
+            text.as_bytes()
+                .get(r)
+                .and_then(parse_digits)
+                .and_then(|n| u16::try_from(n).ok())
+                .unwrap_or(u16::MAX)
+        };
         let (month, day) = (number(4..6), number(6..8));
         Self::new(
             number(0..4),
@@ -310,6 +330,10 @@ impl BusinessDate {
         self.days() - earlier.days()
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "BusinessDate::new が実在する日だけを通すので、ここで None になる値は作れない"
+    )]
     fn days(self) -> i64 {
         days_from_civil(
             u32::from(self.year),
@@ -344,7 +368,7 @@ pub struct HistoryWindow {
 }
 
 impl HistoryWindow {
-    pub const MAX_SPAN: Duration = Duration::from_secs(30 * 60);
+    pub const MAX_SPAN: Duration = Duration::from_mins(30);
 
     /// `from` から始まり、取引所の既定 (30 分) で閉じる窓。
     ///
@@ -516,7 +540,7 @@ impl LongInterval {
 
 impl KlineSpan {
     /// クエリの `(interval, date)` の値。たとえば `("1min", "20210417")`。
-    pub(crate) fn query(&self) -> (&'static str, String) {
+    pub(crate) fn query(self) -> (&'static str, String) {
         match self {
             Self::Day { interval, date } => (interval.as_str(), date.to_string()),
             Self::Year { interval, year } => (interval.as_str(), format!("{year:04}")),

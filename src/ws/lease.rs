@@ -102,7 +102,7 @@ impl Auth {
     /// 延長の結果。成功なら `extend_at` と `expires_at` は送った時刻から
     /// 45/60 分後に動く。失敗ならリースは保ち、1 分後 (ただし `expires_at`
     /// まで) に再試行する。その後は次の接続が新しいトークンを取得する。
-    pub(super) fn extended(&mut self, sent_at: Instant, result: Result<()>) {
+    pub(super) fn extended(&mut self, sent_at: Instant, result: &Result<()>) {
         let Auth::Private {
             lease: Some(lease),
             schedule,
@@ -143,6 +143,10 @@ pub(super) struct TokenLease {
 /// トークンの寿命の刻み。既定は取引所の 60 分に対して 45 分で延長、失敗なら
 /// 1 分後に再試行。テストは短くする。
 #[derive(Clone, Copy, Debug)]
+#[expect(
+    clippy::struct_field_names,
+    reason = "どの接尾辞も「送った時刻から何分後か」という意味を持つので、そろえて after と呼ぶ"
+)]
 pub(crate) struct LeaseSchedule {
     pub(crate) extend_after: Duration,
     pub(crate) retry_after: Duration,
@@ -152,9 +156,9 @@ pub(crate) struct LeaseSchedule {
 impl Default for LeaseSchedule {
     fn default() -> Self {
         Self {
-            extend_after: Duration::from_secs(45 * 60),
+            extend_after: Duration::from_mins(45),
             retry_after: Duration::from_secs(60),
-            expires_after: Duration::from_secs(60 * 60),
+            expires_after: Duration::from_hours(1),
         }
     }
 }
@@ -178,6 +182,10 @@ impl TokenLease {
     }
 
     /// 延長の future に渡す複製。
+    #[expect(
+        clippy::expect_used,
+        reason = "複製元は AccessToken::parse を通った値なので、同じ文字列は必ず再びパースできる"
+    )]
     fn token_copy(&self) -> AccessToken {
         AccessToken::parse(self.token.reveal()).expect("a copy of a parsed token")
     }

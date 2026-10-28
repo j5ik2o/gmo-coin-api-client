@@ -99,12 +99,8 @@ impl ApiSecret {
             ctx.update(part);
         }
         let tag = ctx.sign();
-        const HEX: &[u8; 16] = b"0123456789abcdef";
         let mut hex = Zeroizing::new([0u8; 64]);
-        for (i, b) in tag.as_ref().iter().enumerate() {
-            hex[2 * i] = HEX[usize::from(b >> 4)];
-            hex[2 * i + 1] = HEX[usize::from(b & 0x0f)];
-        }
+        crate::domain::write_hex(&mut *hex, tag.as_ref());
         Signature(hex)
     }
 }
@@ -243,11 +239,11 @@ pub(crate) struct SignedPath(&'static str);
 impl SignedPath {
     pub(crate) const fn new(path: &'static str) -> Self {
         let b = path.as_bytes();
-        assert!(b.len() > 4 && b[0] == b'/' && b[1] == b'v' && b[2] == b'1' && b[3] == b'/');
-        let mut i = 0;
-        while i < b.len() {
-            assert!(b[i] != b'?', "query string is not part of the signed path");
-            i += 1;
+        assert!(matches!(b, [b'/', b'v', b'1', b'/', _, ..]));
+        let mut remaining = b;
+        while let [byte, rest @ ..] = remaining {
+            assert!(*byte != b'?', "query string is not part of the signed path");
+            remaining = rest;
         }
         Self(path)
     }

@@ -25,7 +25,7 @@ pub trait Codec: Sized + PartialEq {
     /// `channel` が既知のチャネルを指すのにペイロードが一致しないとき
     /// `WsMessage` (フェイルクローズド)。`error` フィールドを持つ
     /// メッセージは `Decoded::Rejected` になる。それ以外の形も `WsMessage`。
-    fn decode(text: &str) -> core::result::Result<Decoded<Self::Event>, ProtocolErrorKind>;
+    fn decode(text: &str) -> Result<Decoded<Self::Event>, ProtocolErrorKind>;
     /// データイベントのキー。`Disconnected`、`Reconnected`、`Rejected` は `None`。
     fn event_key(event: &Self::Event) -> Option<Self::Key>;
     fn disconnected(d: Disconnect) -> Self::Event;
@@ -44,7 +44,8 @@ pub enum Decoded<E> {
 /// subscribe / unsubscribe コマンドの本文。
 #[derive(Serialize)]
 struct Command<'a> {
-    command: &'static str,
+    #[serde(rename = "command")]
+    verb: &'static str,
     channel: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     symbol: Option<&'a str>,
@@ -53,6 +54,10 @@ struct Command<'a> {
 }
 
 impl Command<'_> {
+    #[expect(
+        clippy::expect_used,
+        reason = "文字列だけの平らなオブジェクトの直列化は失敗しない"
+    )]
     fn render(&self) -> String {
         serde_json::to_string(self).expect("a command is a plain object of strings")
     }
@@ -80,11 +85,11 @@ fn ws_message(e: &serde_json::Error) -> ProtocolErrorKind {
     }
 }
 
-fn head(text: &str) -> core::result::Result<Head, ProtocolErrorKind> {
+fn head(text: &str) -> Result<Head, ProtocolErrorKind> {
     serde_json::from_str(text).map_err(|e| ws_message(&e))
 }
 
-fn payload<T: DeserializeOwned>(text: &str) -> core::result::Result<T, ProtocolErrorKind> {
+fn payload<T: DeserializeOwned>(text: &str) -> Result<T, ProtocolErrorKind> {
     serde_json::from_str(text).map_err(|e| ws_message(&e))
 }
 
@@ -125,14 +130,14 @@ impl Codec for PublicChannel {
             }
         };
         Command {
-            command: command_word(subscribe),
+            verb: command_word(subscribe),
             channel,
             symbol: Some(symbol.as_str()),
             option,
         }
         .render()
     }
-    fn decode(text: &str) -> core::result::Result<Decoded<PublicEvent>, ProtocolErrorKind> {
+    fn decode(text: &str) -> Result<Decoded<PublicEvent>, ProtocolErrorKind> {
         let head = head(text)?;
         if let Some(error) = head.error {
             return Ok(Decoded::Rejected(rejection(error)));
@@ -186,14 +191,14 @@ impl Codec for PrivateChannel {
             }
         };
         Command {
-            command: command_word(subscribe),
+            verb: command_word(subscribe),
             channel,
             symbol: None,
             option,
         }
         .render()
     }
-    fn decode(text: &str) -> core::result::Result<Decoded<PrivateEvent>, ProtocolErrorKind> {
+    fn decode(text: &str) -> Result<Decoded<PrivateEvent>, ProtocolErrorKind> {
         let head = head(text)?;
         if let Some(error) = head.error {
             return Ok(Decoded::Rejected(rejection(error)));

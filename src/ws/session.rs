@@ -481,6 +481,10 @@ impl<C: FeedChannel> Session<C> {
     }
 
     /// `Connected` での 1 歩。`None` なら何も返すものがなく、ループを続ける。
+    #[expect(
+        clippy::too_many_lines,
+        reason = "1 つの select! の待ち受けと、その結果ごとの処理を 1 か所で読めるようにしている。分けると状態の受け渡しが増える"
+    )]
     async fn step(&mut self) -> Option<Result<<C as Codec>::Event>> {
         let Self {
             inner,
@@ -497,9 +501,8 @@ impl<C: FeedChannel> Session<C> {
             _ => &inner.public_ws_pacer,
         };
         let timeouts = inner.config.timeouts;
-        if conn.closing.is_some() {
+        if let Some(reason) = conn.closing.take() {
             let _ = tokio::time::timeout(timeouts.ws_write.get(), conn.stream.flush()).await;
-            let reason = conn.closing.take().expect("checked just above");
             return Some(Ok(self.drop_connection(reason)));
         }
         let now = Instant::now();
@@ -525,12 +528,12 @@ impl<C: FeedChannel> Session<C> {
                 Some(fut) => fut.as_mut().poll(cx),
                 None => Poll::Pending,
             }) => Step::Extended(sent_at, result),
-            _ = sleep_until(extend_at.unwrap_or(now)), if extend_at.is_some() => Step::ExtendDue,
-            _ = sleep_until(slot.unwrap_or(now)), if slot.is_some() && !want_write => Step::SlotReached,
+            () = sleep_until(extend_at.unwrap_or(now)), if extend_at.is_some() => Step::ExtendDue,
+            () = sleep_until(slot.unwrap_or(now)), if slot.is_some() && !want_write => Step::SlotReached,
             step = poll_fn(|cx| conn.poll_socket(cx, want_write, window_elapsed, timeouts.ws_write.get(), &inner.config.limits)) => step,
-            _ = sleep_until(window_closes_at.unwrap_or(now)), if window_closes_at.is_some() && !window_elapsed => Step::RejectionWindowDue,
-            _ = sleep_until(write_deadline.unwrap_or(now)), if write_deadline.is_some() => Step::WriteTimedOut,
-            _ = sleep_until(idle_at) => Step::Idle,
+            () = sleep_until(window_closes_at.unwrap_or(now)), if window_closes_at.is_some() && !window_elapsed => Step::RejectionWindowDue,
+            () = sleep_until(write_deadline.unwrap_or(now)), if write_deadline.is_some() => Step::WriteTimedOut,
+            () = sleep_until(idle_at) => Step::Idle,
         };
 
         match step {
@@ -561,10 +564,11 @@ impl<C: FeedChannel> Session<C> {
                 conn.closing = Some(DisconnectReason::ServerClosed { code });
                 None
             }
-            Step::Message(_) => None,
             Step::Failed(kind) => Some(Ok(self.drop_connection(live_failure(C::API, kind)))),
             Step::WriteReady => {
-                let (channel, subscribe) = command.expect("want_write implies a command");
+                let Some((channel, subscribe)) = command else {
+                    unreachable!("want_write implies a command");
+                };
                 if pacer.take().is_err() {
                     return None;
                 }
@@ -585,7 +589,7 @@ impl<C: FeedChannel> Session<C> {
                 conn.flush_since.get_or_insert_with(Instant::now);
                 None
             }
-            Step::SlotReached | Step::RejectionWindowDue => None,
+            Step::Message(_) | Step::SlotReached | Step::RejectionWindowDue => None,
             Step::RejectionWindowClosed => {
                 sent.last = None;
                 None
@@ -607,7 +611,7 @@ impl<C: FeedChannel> Session<C> {
                 None
             }
             Step::Extended(sent_at, result) => {
-                self.auth.extended(sent_at, result);
+                self.auth.extended(sent_at, &result);
                 None
             }
         }
@@ -626,7 +630,7 @@ impl<C: FeedChannel> Session<C> {
     /// - 再利用したトークンなら `ReusedTokenRejected`。セッションがリースを
     ///   捨て、次の試行が取り直す。
     fn dial(&mut self) -> DialFuture {
-        let inner = self.inner.clone();
+        let inner = Arc::clone(&self.inner);
         match &self.auth {
             Auth::Public => Box::pin(async move {
                 let result = ws::connect(
@@ -656,21 +660,20 @@ impl<C: FeedChannel> Session<C> {
                     .filter(|l| l.is_live(Instant::now()))
                     .map(TokenLease::path);
                 Box::pin(async move {
-                    let (path, source) = match reused {
-                        Some(path) => (path, TokenSource::Reused),
-                        None => {
-                            let sent_at = Instant::now();
-                            match client.acquire_ws_token().await {
-                                Ok(token) => {
-                                    let lease = TokenLease::new(token, sent_at, schedule);
-                                    (lease.path(), TokenSource::Fresh(lease))
-                                }
-                                Err(e) => {
-                                    return Dialed {
-                                        result: Err(acquire_failure(e)),
-                                        token: TokenSource::None,
-                                    };
-                                }
+                    let (path, source) = if let Some(path) = reused {
+                        (path, TokenSource::Reused)
+                    } else {
+                        let sent_at = Instant::now();
+                        match client.acquire_ws_token().await {
+                            Ok(token) => {
+                                let lease = TokenLease::new(token, sent_at, schedule);
+                                (lease.path(), TokenSource::Fresh(lease))
+                            }
+                            Err(e) => {
+                                return Dialed {
+                                    result: Err(acquire_failure(e)),
+                                    token: TokenSource::None,
+                                };
                             }
                         }
                     };
@@ -794,7 +797,7 @@ impl Session<PrivateChannel> {
     }
 
     pub(crate) fn private_with(client: Client<Authenticated>, schedule: LeaseSchedule) -> Self {
-        let inner = client.inner.clone();
+        let inner = Arc::clone(&client.inner);
         Self {
             inner,
             auth: Auth::Private {
