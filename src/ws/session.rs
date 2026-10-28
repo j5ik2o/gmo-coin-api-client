@@ -20,9 +20,19 @@
 //! - コマンドは、同じポーリングの中で `Pacer::take` が通った直後にだけ書く。
 //!   ペーサの予約は持たないので、キャンセルで失われるものも、遅れて使われる
 //!   ものもない。
+//! - `sent.last` がある間は、次のコマンドを書かない。先にソケットを読む。
+//!   未読の拒否を読む前に次を書くと、その拒否が後のコマンドに付いてしまう
+//!   (issue #14)。窓が閉じるまで (期限を過ぎた後は `REJECTION_DRAIN_LIMIT`
+//!   フレームまで) 読み、それでもソケットが空にならない (受信が途切れない)
+//!   ときは、帰属をあきらめて書く。書き込みが永久に止まらないようにするため
+//!   である。あきらめている間は書き込みを止めず、拒否はどのコマンドにも
+//!   結び付けない (`Rejected { channel: None }`)。あきらめている間に書いた
+//!   コマンドも `last` に残す。
 //! - `sent.last` が残るのは、その書き込みから `REJECTION_WINDOW` を過ぎた後に、
 //!   ソケットに未読のフレームがないことを `next` がまだ観測していない間だけ
-//!   である。
+//!   である。あきらめている場合は、空を観測しただけでは消さない。空の観測と、
+//!   `last` (あきらめている間に書いた最後のコマンド) の窓の期限が揃って初めて
+//!   帰属を再開する。揃うまでに届いた拒否は `None` のままにする。
 
 use std::collections::BTreeMap;
 use std::future::{Future, poll_fn};
@@ -69,6 +79,18 @@ pub(super) const OPERATION: &str = "/v1";
 /// `Pending` は、読めるデータが残っていても返るので、空のソケットの証拠に
 /// ならない。期限のタイマーはタスクを起こすだけで、窓を閉じない。
 pub(crate) const REJECTION_WINDOW: Duration = Pacer::INTERVAL;
+
+/// 拒否の窓の期限を過ぎてから、次のコマンドを待たせたまま読むフレーム数の
+/// 上限。受信が途切れないソケットでは空を観測できないので、この数に達したら
+/// 前のコマンドへの帰属をあきらめて書く。ここで待ち続けると、受信が途切れない
+/// 間、書き込みが永久に止まる。取引所は不正なコマンドにすぐ答えるので、
+/// 拒否は普通この数より手前に並ぶ。
+///
+/// あきらめた帰属は、空のソケットを観測しただけでは戻さない。あきらめている
+/// 間に書いた最後のコマンドの窓の期限も過ぎている必要がある。そのコマンドへの
+/// 返答はまだ届いていないかもしれず、戻した直後に読む拒否を後のコマンドに
+/// 付けてしまうからである。
+pub(crate) const REJECTION_DRAIN_LIMIT: u32 = 64;
 
 /// 1 回の接続試行。`State::Dialing` に保存され、キャンセルの後も続きから
 /// 進む。
@@ -123,8 +145,20 @@ struct Sent<C: FeedChannel> {
     /// 拒否の窓 (`REJECTION_WINDOW`) が閉じていないもの。これがある間に
     /// 読んだサーバの拒否は、これに帰属する。新しいキーの subscribe はその
     /// キーの最初のデータイベントで裏付けられる。拒否は 1 つのコマンドに
-    /// しか帰属しない。
+    /// しか帰属しない。これがある間は次のコマンドを書かず、先にソケットを
+    /// 読む。
     last: Option<(Instant, Written<C>)>,
+    /// `last` の窓の期限を過ぎてから、次に書くコマンドを待たせたまま読んだ
+    /// フレームの数。`REJECTION_DRAIN_LIMIT` に達したら `last` の帰属を
+    /// あきらめる。
+    read_after_deadline: u32,
+    /// 期限までにソケットを空にできず、帰属をあきらめた。未読の拒否が残って
+    /// いるかもしれないので、どの拒否も新しいコマンドに結び付けず、`None` で
+    /// 知らせる。書き込みは止めない。あきらめている間に書いたコマンドは `last`
+    /// に残す。帰属を再開するのは、ソケットが空だと観測し、かつ `last` の窓の
+    /// 期限も過ぎたときである。それまでは、遅れて届いた拒否がどのコマンドの
+    /// ものか決められない。
+    attribution_abandoned: bool,
 }
 
 impl<C: FeedChannel> Sent<C> {
@@ -132,13 +166,22 @@ impl<C: FeedChannel> Sent<C> {
         Self {
             subscribed: BTreeMap::new(),
             last: None,
+            read_after_deadline: 0,
+            attribution_abandoned: false,
         }
     }
 
     /// `key` のデータイベントが届いた。新しいキーの subscribe ならそれで
     /// 通ったと分かる。置き換えは分からない: 古い購読のデータが同じキーで
     /// 流れ続けるからである。
+    ///
+    /// 帰属をあきらめている間は `last` を残す。`last` の書き込み時刻が、帰属を
+    /// 再開してよいかを決める窓の起点になる。データで裏付けられたコマンドへの
+    /// 拒否はもう来ないが、それより前に送ったコマンドへの未読の拒否は残り得る。
     fn confirmed(&mut self, key: &<C as Codec>::Key) {
+        if self.attribution_abandoned {
+            return;
+        }
         if let Some((
             _,
             Written::Subscribe {
@@ -149,6 +192,7 @@ impl<C: FeedChannel> Sent<C> {
             && channel.key() == *key
         {
             self.last = None;
+            self.read_after_deadline = 0;
         }
     }
 
@@ -158,8 +202,16 @@ impl<C: FeedChannel> Sent<C> {
     /// 送っていない別のコマンドだからである。そのようなコマンドがなければ
     /// `None` を返し、何も変えない。読んだ時刻は見ない。窓を閉じるのは
     /// ソケットが空だと観測したときの `Step::RejectionWindowClosed` だけである。
+    ///
+    /// 帰属をあきらめている間 (`attribution_abandoned`) は、未読の拒否がどの
+    /// コマンドのものか決められないので、何も変えずに `None` を返す。`last`
+    /// は帰属を再開してよいかの窓の起点として残す。
     fn rejected(&mut self, desired: &mut BTreeMap<<C as Codec>::Key, C>) -> Option<C> {
+        if self.attribution_abandoned {
+            return None;
+        }
         let (_, command) = self.last.take()?;
+        self.read_after_deadline = 0;
         match command {
             Written::Subscribe { channel, .. } => {
                 let key = channel.key();
@@ -212,7 +264,9 @@ enum Step {
     ExtendDue,
     Extended(Instant, Result<()>),
     /// 拒否の窓の期限を過ぎてから、予算の残った読み込みが `Pending` を
-    /// 返した。ソケットに未読のフレームがない。`poll_socket` だけが返す。
+    /// 返した。ソケットに未読のフレームがない。拒否の窓を閉じ、あきらめて
+    /// いた帰属も再開する (空の観測と `last` の期限が揃ったときだけである)。
+    /// `poll_socket` だけが返す。
     RejectionWindowClosed,
     /// 拒否の窓の期限に達した。タスクを起こすだけで状態は変えない。窓を
     /// 閉じるかどうかは、次のポーリングの `poll_socket` が決める。
@@ -231,9 +285,11 @@ impl Connection {
     ///
     /// 拒否の窓も同じように、読み込みが `Pending` を返した直後にここで閉じる。
     /// ソケットが空だと知るのは読み込みだけだからである。`window_elapsed` は、
-    /// このポーリングを始めた時点で窓の期限を過ぎていたことを表す。ただし、
-    /// 予算切れの `Pending` は空のソケットの証拠にならないので、読み込みの
-    /// 前後で予算が残っていたかを確かめる。
+    /// このポーリングを始めた時点で窓の期限を過ぎていたことを表す。帰属を
+    /// あきらめている間も、窓の起点は `last` (あきらめている間に書いた最後の
+    /// コマンド) なので、期限の後に空を観測したときだけ帰属を再開する。
+    /// ただし、予算切れの `Pending` は空のソケットの証拠にならないので、
+    /// 読み込みの前後で予算が残っていたかを確かめる。
     fn poll_socket(
         &mut self,
         cx: &mut Context<'_>,
@@ -525,7 +581,6 @@ impl<C: FeedChannel> Session<C> {
 
         let command = next_command::<C>(desired, &sent.subscribed);
         let slot = command.as_ref().map(|_| pacer.next_free());
-        let want_write = slot.is_some_and(|at| at <= now);
         let idle_at = conn.last_frame_at + timeouts.ws_idle.get();
         let write_deadline = conn
             .flush_since
@@ -537,6 +592,22 @@ impl<C: FeedChannel> Session<C> {
             .as_ref()
             .map(|(written_at, _)| *written_at + REJECTION_WINDOW);
         let window_elapsed = window_closes_at.is_some_and(|at| at <= now);
+        // 期限を過ぎてもソケットが空にならない (受信が途切れない) ときは、
+        // 前のコマンドへの帰属をあきらめて書き込みに進む。ここで待ち続けると、
+        // 受信が途切れない間、書き込みが永久に止まる。`last` は残す: 帰属を
+        // 再開してよいかを決める窓の起点であり、あきらめている間に書く次の
+        // コマンドの書き込み時刻で置き換わる。
+        if window_elapsed && command.is_some() && sent.read_after_deadline >= REJECTION_DRAIN_LIMIT
+        {
+            sent.attribution_abandoned = true;
+            sent.read_after_deadline = 0;
+        }
+        // 前のコマンドへの拒否を読む前に次を書くと、その拒否が後のコマンドに
+        // 付いてしまう (issue #14)。`last` がある間は書かず、まず読む。
+        // あきらめている間だけは、書き込みを止めないためにそのまま書く。
+        let gated = sent.last.is_some() && !sent.attribution_abandoned;
+        let want_write = !gated && slot.is_some_and(|at| at <= now);
+        let draining = command.is_some() && gated;
 
         let step = tokio::select! {
             biased;
@@ -545,12 +616,18 @@ impl<C: FeedChannel> Session<C> {
                 None => Poll::Pending,
             }) => Step::Extended(sent_at, result),
             () = sleep_until(extend_at.unwrap_or(now)), if extend_at.is_some() => Step::ExtendDue,
-            () = sleep_until(slot.unwrap_or(now)), if slot.is_some() && !want_write => Step::SlotReached,
+            () = sleep_until(slot.unwrap_or(now)), if slot.is_some_and(|at| at > now) => Step::SlotReached,
             step = poll_fn(|cx| conn.poll_socket(cx, want_write, window_elapsed, timeouts.ws_write.get(), &inner.config.limits)) => step,
             () = sleep_until(window_closes_at.unwrap_or(now)), if window_closes_at.is_some() && !window_elapsed => Step::RejectionWindowDue,
             () = sleep_until(write_deadline.unwrap_or(now)), if write_deadline.is_some() => Step::WriteTimedOut,
             () = sleep_until(idle_at) => Step::Idle,
         };
+
+        // 次のコマンドを待たせている間は、読んだフレームを数える。期限の後に
+        // 上限まで読んでソケットが空にならなければ、帰属をあきらめる。
+        if matches!(step, Step::Message(_)) && draining && window_elapsed {
+            sent.read_after_deadline = sent.read_after_deadline.saturating_add(1);
+        }
 
         match step {
             Step::Message(Message::Text(text)) => match C::decode(&text) {
@@ -603,13 +680,22 @@ impl<C: FeedChannel> Session<C> {
                     sent.subscribed.remove(&key);
                     Written::Unsubscribe(channel)
                 };
+                // あきらめている間も、このコマンドを `last` に残す。`last` の
+                // 書き込み時刻が、帰属を再開してよいかを決める窓の起点になる。
+                // 拒否は再開までどのコマンドにも結び付かない。
                 sent.last = Some((Instant::now(), written));
+                sent.read_after_deadline = 0;
                 conn.flush_since.get_or_insert_with(Instant::now);
                 None
             }
             Step::Message(_) | Step::SlotReached | Step::RejectionWindowDue => None,
             Step::RejectionWindowClosed => {
+                // 空のソケットと `last` の窓の期限が揃った。あきらめていた
+                // 帰属もここで再開する。それまでに読んだ拒否は、どのコマンドの
+                // ものか決められないので `None` のままにしておく。
                 sent.last = None;
+                sent.attribution_abandoned = false;
+                sent.read_after_deadline = 0;
                 None
             }
             Step::Idle => Some(Ok(self.drop_connection(live_failure(
@@ -874,6 +960,36 @@ mod tests {
         assert_eq!(
             next_command::<PublicChannel>(&desired, &sent),
             Some((ticker, false))
+        );
+    }
+
+    /// 帰属をあきらめている間は、未読の拒否が前のコマンドのものかもしれない。
+    /// 拒否はどのコマンドにも結び付かず、望ましい集合も変わらない。
+    #[test]
+    fn an_abandoned_attribution_names_no_channel_and_drops_nothing() {
+        let ticker = PublicChannel::Ticker(Symbol::ETH);
+        let mut desired = BTreeMap::new();
+        desired.insert(ticker.key(), ticker.clone());
+        let mut sent = Sent::<PublicChannel>::empty();
+        sent.subscribed.insert(ticker.key(), ticker.clone());
+        sent.last = Some((
+            Instant::now(),
+            Written::Subscribe {
+                channel: ticker.clone(),
+                replaced: false,
+            },
+        ));
+        sent.attribution_abandoned = true;
+
+        assert_eq!(sent.rejected(&mut desired), None);
+        assert!(
+            desired.contains_key(&ticker.key()),
+            "the rejected subscribe stayed in the desired set"
+        );
+        assert!(sent.subscribed.contains_key(&ticker.key()));
+        assert!(
+            sent.last.is_some(),
+            "the write time stays as the anchor for resuming attribution"
         );
     }
 
