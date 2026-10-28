@@ -18,9 +18,13 @@ use crate::domain::{InvalidValue, Primitive, Violation, check_size_and_lexical};
 /// よう、それぞれ差し替え可能である。
 #[derive(Clone, Debug)]
 pub struct Endpoints {
+    /// 公開 REST API のベース。
     pub public_rest: RestBase,
+    /// 認証が必要な REST API のベース。
     pub private_rest: RestBase,
+    /// 公開 WebSocket API のベース。
     pub public_ws: WsBase,
+    /// 認証が必要な WebSocket API のベース。
     pub private_ws: WsBase,
 }
 
