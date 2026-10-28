@@ -7,16 +7,24 @@ use crate::client::{Access, Client};
 use crate::domain::{Decimal, ExchangeStatus, KlineSpan, Price, Side, Size, Symbol, Timestamp};
 use crate::error::{Postcondition, ProtocolErrorKind, Result};
 
+/// 銘柄 1 つの最新レート。`GET /public/v1/ticker` と Public WebSocket の `ticker` で同じ形。
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct Ticker {
+    /// 取扱銘柄。
     pub symbol: Symbol,
+    /// 現在の売注文の最良気配値。
     pub ask: Price,
+    /// 現在の買注文の最良気配値。
     pub bid: Price,
+    /// 当日の最高値 (最終取引価格)。
     pub high: Price,
+    /// 最終取引価格。
     pub last: Price,
+    /// 当日の最安値 (最終取引価格)。
     pub low: Price,
     /// 24 時間の取引量。
     pub volume: Size,
+    /// 約定時のタイムスタンプ。
     pub timestamp: Timestamp,
 }
 
@@ -24,34 +32,53 @@ pub struct Ticker {
 /// 降順。送られたままの順序である。
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct OrderBook {
+    /// 取扱銘柄。
     pub symbol: Symbol,
+    /// 売り注文の情報 (最良気配から昇順)。
     pub asks: Vec<OrderBookLevel>,
+    /// 買い注文の情報 (最良気配から降順)。
     pub bids: Vec<OrderBookLevel>,
 }
 
+/// 板の 1 気配。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 pub struct OrderBookLevel {
+    /// 気配の価格。
     pub price: Price,
+    /// 気配の数量。
     pub size: Size,
 }
 
+/// `GET /public/v1/trades` の約定 1 件。
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct Trade {
+    /// 約定価格。
     pub price: Price,
+    /// 売買区分。
     pub side: Side,
+    /// 約定数量。
     pub size: Size,
+    /// 約定日時。
     pub timestamp: Timestamp,
 }
 
+/// `GET /public/v1/klines` の 1 本。
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Kline {
+    /// 開始時刻。ワイヤ上の `openTime` はミリ秒単位の unix タイムスタンプの文字列で、
+    /// デコード時に [`Timestamp`] に変換する。
     #[serde(deserialize_with = "Timestamp::deserialize_millis")]
     pub open_time: Timestamp,
+    /// 始値。
     pub open: Price,
+    /// 高値。
     pub high: Price,
+    /// 安値。
     pub low: Price,
+    /// 終値。
     pub close: Price,
+    /// 取引量。
     pub volume: Size,
 }
 
@@ -59,13 +86,19 @@ pub struct Kline {
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SymbolRule {
+    /// 取扱銘柄。
     pub symbol: Symbol,
+    /// 最小注文数量/回。
     pub min_order_size: Size,
+    /// 最大注文数量/回。
     pub max_order_size: Size,
+    /// 最小注文単位/回。
     pub size_step: Size,
+    /// 注文価格の呼値。
     pub tick_size: Price,
     /// 符号付き: maker 手数料は負 (リベート) になる。
     pub taker_fee: Decimal,
+    /// maker 手数料。
     pub maker_fee: Decimal,
 }
 

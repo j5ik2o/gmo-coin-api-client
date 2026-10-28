@@ -40,28 +40,51 @@ pub use time::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Primitive {
+    /// 十進数 ([`Decimal`])。
     Decimal,
+    /// 決済通貨 (JPY) 建ての価格 ([`Price`])。
     Price,
+    /// 基軸資産の数量 ([`Size`])。
     Size,
+    /// 負でない金額 ([`Amount`])。
     Amount,
+    /// 注文に載せる価格 ([`OrderPrice`])。
     OrderPrice,
+    /// 注文に載せる数量 ([`OrderSize`])。
     OrderSize,
+    /// 銘柄 ([`Symbol`])。
     Symbol,
+    /// 注文 id ([`OrderId`])。
     OrderId,
+    /// 約定 id ([`ExecutionId`])。
     ExecutionId,
+    /// 建玉 id ([`PositionId`])。
     PositionId,
+    /// 呼び出し側が付ける注文 id ([`ClientOrderId`])。
     ClientOrderId,
+    /// 件数に上限のあるリスト ([`Batch`])。`BulkCancel` の `symbols` が空のときにも使う。
     Batch,
+    /// 時刻 ([`Timestamp`])。
     Timestamp,
+    /// 営業日 ([`BusinessDate`])。
     BusinessDate,
+    /// 入出金履歴の期間 ([`HistoryWindow`])。
     HistoryWindow,
+    /// 営業日の範囲 ([`BusinessDateRange`])。
     BusinessDateRange,
+    /// 列挙値の文字列 ([`UnknownValue`] に保持される値)。
     EnumValue,
+    /// API キー。
     ApiKey,
+    /// API シークレット。
     ApiSecret,
+    /// アクセストークン。
     AccessToken,
+    /// 接続先の基底 URL。
     BaseUrl,
+    /// クライアントの設定値。
     Config,
+    /// ページ指定 ([`PageRequest`](crate::PageRequest))。
     PageRequest,
     /// `exchangeFee/history` の継続トークン。取引所から受け取った文字列を
     /// 呼び出し側が渡し直すもので、長さだけを検査する。
@@ -72,14 +95,21 @@ pub enum Primitive {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Violation {
-    /// 段階 1。`max` バイトより長いか、`min` バイトより短い。
+    /// 段階 1。長さが `min..=max` の外にある。長さの単位は、[`Primitive::Batch`] では
+    /// 要素の件数、それ以外のプリミティブでは入力のバイト数である。
     Size {
+        /// 許される長さの下限。
         min: usize,
+        /// 許される長さの上限。
         max: usize,
+        /// 実際の長さ。
         actual: usize,
     },
     /// 段階 2。許されない バイトがこのバイトオフセットにある。
-    Lexical { offset: usize },
+    Lexical {
+        /// 許されないバイトの、入力の先頭からのバイトオフセット。
+        offset: usize,
+    },
     /// 段階 3。バイトは許されるが構造が違う。
     Syntax(&'static str),
     /// 段階 4。形は正しいがドメインの外にある (たとえば負の値)。
@@ -93,7 +123,9 @@ pub enum Violation {
 /// プリミティブ名と失敗した段階だけである。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct InvalidValue {
+    /// 値を拒否したプリミティブ。
     pub primitive: Primitive,
+    /// 失敗した検証段階。
     pub violation: Violation,
 }
 

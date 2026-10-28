@@ -67,9 +67,13 @@ pub struct NewOrder {
     /// ワイヤ上は任意だが、ここでは必須。結果不明の後に安全に再送できる
     /// ようになる。`ClientOrderId::generate()` を使う。
     pub client_order_id: ClientOrderId,
+    /// 取引する銘柄。
     pub symbol: Symbol,
+    /// 売買区分。
     pub side: Side,
+    /// 注文数量。ゼロでない。
     pub size: OrderSize,
+    /// 執行方法。
     pub execution: OrderExecution,
 }
 
@@ -83,14 +87,19 @@ pub enum OrderExecution {
     MarketCancelBefore,
     /// LIMIT。`losscut_price` はレバレッジ銘柄のみ。
     Limit {
+        /// 指値。ゼロでない。
         price: OrderPrice,
+        /// 執行数量条件。`SOK` (post-only) も選べる。
         time_in_force: LimitTimeInForce,
+        /// ロスカットレート。レバレッジ銘柄のみ。指定しないときは `None`。
         losscut_price: Option<OrderPrice>,
     },
     /// STOP (`price` で発動する逆指値の成行)。取引所は FAK で執行する。
     /// `losscut_price` はレバレッジ銘柄のみ。
     Stop {
+        /// 逆指値の発動価格。ゼロでない。
         price: OrderPrice,
+        /// ロスカットレート。レバレッジ銘柄のみ。指定しないときは `None`。
         losscut_price: Option<OrderPrice>,
     },
 }
@@ -222,6 +231,7 @@ pub(crate) struct WireOrder<'a> {
 /// `size` はゼロでない。決済する建玉はちょうど 1 つ。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClosePosition {
+    /// 顧客注文 ID。`NewOrder::client_order_id` と同じく必須で、結果不明の後に安全に再送できるようにする。
     pub client_order_id: ClientOrderId,
     /// レバレッジ銘柄でなければならない (`Error::Contract(RequiresLeverageSymbol)`)。
     pub symbol: Symbol,
@@ -230,22 +240,30 @@ pub struct ClosePosition {
     pub side: Side,
     /// `settlePosition` は建玉を 1 つだけ取る。これがその 1 つ。
     pub position_id: PositionId,
+    /// 決済する数量。ゼロでない。
     pub size: OrderSize,
+    /// 執行方法。
     pub execution: CloseExecution,
 }
 
 /// `/closeOrder` の執行方法。`losscutPrice` は文法上存在しない。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CloseExecution {
+    /// MARKET。
     Market,
     /// `cancelBefore: true` (MARKET、FAK)。複数の建玉に紐づく注文には取引所が
     /// 拒否する。
     MarketCancelBefore,
+    /// LIMIT。
     Limit {
+        /// 指値。ゼロでない。
         price: OrderPrice,
+        /// 執行数量条件。`SOK` (post-only) も選べる。
         time_in_force: LimitTimeInForce,
     },
+    /// STOP (`price` で発動する逆指値の成行)。
     Stop {
+        /// 逆指値の発動価格。ゼロでない。
         price: OrderPrice,
     },
 }
@@ -305,23 +323,33 @@ struct WireSettle {
 /// `size` はゼロでない。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BulkClose {
+    /// 顧客注文 ID。`NewOrder::client_order_id` と同じく必須で、結果不明の後に安全に再送できるようにする。
     pub client_order_id: ClientOrderId,
     /// レバレッジ銘柄でなければならない。
     pub symbol: Symbol,
+    /// 決済注文の売買区分。
     pub side: Side,
+    /// 決済する数量。ゼロでない。
     pub size: OrderSize,
+    /// 執行方法。
     pub execution: BulkCloseExecution,
 }
 
 /// `/closeBulkOrder` の執行方法。`cancelBefore` は文法上存在しない。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BulkCloseExecution {
+    /// MARKET。
     Market,
+    /// LIMIT。
     Limit {
+        /// 指値。ゼロでない。
         price: OrderPrice,
+        /// 執行数量条件。`SOK` (post-only) も選べる。
         time_in_force: LimitTimeInForce,
     },
+    /// STOP (`price` で発動する逆指値の成行)。
     Stop {
+        /// 逆指値の発動価格。ゼロでない。
         price: OrderPrice,
     },
 }
@@ -378,8 +406,11 @@ pub(crate) fn require_leverage(symbol: &Symbol) -> Result<(), ContractViolation>
 /// が送信前に検査する。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BulkCancel {
+    /// 取消対象の銘柄。空にできない。`Client::cancel_bulk_orders` が送信前に検査する。
     pub symbols: Vec<Symbol>,
+    /// 指定すると、その売買区分の注文だけを取り消す。`None` なら売買区分で絞らない。
     pub side: Option<Side>,
+    /// 指定すると、現物取引の注文と、その決済区分のレバレッジ取引の注文を取り消す。`None` なら決済区分で絞らない。
     pub settle_type: Option<SettleFilter>,
     /// `desc`: 古い順ではなく新しい順に取り消す。
     pub newest_first: bool,
@@ -431,7 +462,9 @@ pub(crate) struct WireBulkCancel<'a> {
 /// 「11 件以上」も表現できない。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OrderLookup {
+    /// `orderId` で照会する。1 件から 10 件。
     ByOrderIds(Batch<OrderId, 10>),
+    /// `clientOrderId` で照会する。1 件から 10 件。
     ByClientOrderIds(Batch<ClientOrderId, 10>),
 }
 
@@ -450,8 +483,11 @@ impl OrderLookup {
 /// `clientOrderId` (1 件、カンマ区切り不可) のうちちょうど 1 つ。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExecutionLookup {
+    /// `orderId` で照会する。1 件。
     ByOrderId(OrderId),
+    /// `executionId` で照会する。1 件から 10 件。
     ByExecutionIds(Batch<ExecutionId, 10>),
+    /// `clientOrderId` で照会する。1 件。カンマ区切りはできない。
     ByClientOrderId(ClientOrderId),
 }
 

@@ -31,6 +31,7 @@ use super::{InvalidValue, Primitive, check_size_and_lexical, deserialize_text};
 pub struct UnknownValue(Box<str>);
 
 impl UnknownValue {
+    /// 保持できる文字列の最大バイト数。
     pub const MAX_LEN: usize = 64;
 
     fn parse(text: &str) -> Result<Self, InvalidValue> {
@@ -40,6 +41,7 @@ impl UnknownValue {
         Ok(Self(text.into()))
     }
 
+    /// 届いた文字列をそのまま返す。
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -63,6 +65,7 @@ macro_rules! open_enum {
         }
 
         impl $name {
+            /// ワイヤ上の文字列。`Unknown` は届いた文字列をそのまま返す。
             pub fn as_str(&self) -> &str {
                 match self {
                     $(Self::$variant => $wire,)+
@@ -101,6 +104,7 @@ macro_rules! closed_enum {
         }
 
         impl $name {
+            /// ワイヤ上の文字列。
             pub const fn as_str(self) -> &'static str {
                 match self {
                     $(Self::$variant => $wire,)+
@@ -140,7 +144,12 @@ macro_rules! closed_enum {
 
 closed_enum!(
     /// `side`。
-    Side { Buy = "BUY", Sell = "SELL" }
+    Side {
+        /// 買い。
+        Buy = "BUY",
+        /// 売り。
+        Sell = "SELL",
+    }
 );
 
 closed_enum!(
@@ -160,7 +169,12 @@ closed_enum!(
 
 closed_enum!(
     /// `cancelBulkOrder` の `settleType` フィルタ。
-    SettleFilter { Open = "OPEN", Close = "CLOSE" }
+    SettleFilter {
+        /// 現物取引の注文と、新規のレバレッジ取引の注文を取り消す。
+        Open = "OPEN",
+        /// 現物取引の注文と、決済のレバレッジ取引の注文を取り消す。
+        Close = "CLOSE",
+    }
 );
 
 closed_enum!(
@@ -175,18 +189,32 @@ closed_enum!(
 
 open_enum!(
     /// `GET /status`。
-    ExchangeStatus { Maintenance = "MAINTENANCE", PreOpen = "PREOPEN", Open = "OPEN" }
+    ExchangeStatus {
+        /// メンテナンス中。
+        Maintenance = "MAINTENANCE",
+        /// プレオープン中。この間の注文と注文変更は ERR-5203 で拒否される。
+        PreOpen = "PREOPEN",
+        /// 稼動中。
+        Open = "OPEN",
+    }
 );
 
 open_enum!(
     /// 注文の `status`、注文イベントの `orderStatus`。
     OrderStatus {
+        /// 待機中。取引所のドキュメントには「逆指値注文の場合は WAITING が有効」とある。
         Waiting = "WAITING",
+        /// 注文中。
         Ordered = "ORDERED",
+        /// 変更中。
         Modifying = "MODIFYING",
+        /// 取消中。
         Cancelling = "CANCELLING",
+        /// 取消済。理由は [`CancelType`] に入る。
         Canceled = "CANCELED",
+        /// 全量約定。
         Executed = "EXECUTED",
+        /// 失効。
         Expired = "EXPIRED",
     }
 );
@@ -194,86 +222,183 @@ open_enum!(
 open_enum!(
     /// `cancelType`。
     CancelType {
+        /// ユーザーによる取消。
         User = "USER",
+        /// 建玉のロスカットによる取消。
         PositionLosscut = "POSITION_LOSSCUT",
+        /// 残高不足による取消。
         InsufficientBalance = "INSUFFICIENT_BALANCE",
+        /// 証拠金不足による取消。
         InsufficientMargin = "INSUFFICIENT_MARGIN",
+        /// 口座のロスカットによる取消。
         AccountLosscut = "ACCOUNT_LOSSCUT",
+        /// 追加証拠金 (追証) の発生による取消。
         MarginCall = "MARGIN_CALL",
+        /// 追加証拠金 (追証) に伴うロスカットによる取消。
         MarginCallLosscut = "MARGIN_CALL_LOSSCUT",
+        /// `FAK` の条件により、未約定の残数量が失効した。
         ExpiredFak = "EXPIRED_FAK",
+        /// `FOK` の条件により、全数量が失効した。
         ExpiredFok = "EXPIRED_FOK",
+        /// `SOK` (Post-only) の条件により、Maker にならない全数量が失効した。
         ExpiredSok = "EXPIRED_SOK",
+        /// 自己約定 (セルフトレード) による失効。
         ExpiredSelfTrade = "EXPIRED_SELFTRADE",
+        /// 代用暗号資産の清算による取消。
         CollateralLiquidation = "COLLATERAL_LIQUIDATION",
+        /// 注文イベントで `orderStatus` が `CANCELED` または `EXPIRED` のときだけ返る取消区分。
         ClosedOrder = "CLOSED_ORDER",
+        /// 注文イベントで `orderStatus` が `ORDERED` のときだけ返る取消区分。
         SokTaker = "SOK_TAKER",
+        /// 注文イベントで `orderStatus` が `ORDERED` のときだけ返る取消区分。
         PriceLimit = "PRICE_LIMIT",
     }
 );
 
 open_enum!(
     /// `orderType`。
-    OrderType { Normal = "NORMAL", Losscut = "LOSSCUT" }
+    OrderType {
+        /// 通常の注文。
+        Normal = "NORMAL",
+        /// ロスカットによる注文。
+        Losscut = "LOSSCUT",
+    }
 );
 
 open_enum!(
     /// 応答側の `executionType`。
-    ExecutionType { Market = "MARKET", Limit = "LIMIT", Stop = "STOP" }
+    ExecutionType {
+        /// 成行。
+        Market = "MARKET",
+        /// 指値。
+        Limit = "LIMIT",
+        /// 逆指値。
+        Stop = "STOP",
+    }
 );
 
 open_enum!(
     /// 応答側の `settleType`。
-    SettleType { Open = "OPEN", Close = "CLOSE", LossCut = "LOSS_CUT" }
+    SettleType {
+        /// 新規。レバレッジ取引の新規注文とその約定に加え、現物取引の注文と約定もこの値を持つ。
+        Open = "OPEN",
+        /// 決済。
+        Close = "CLOSE",
+        /// ロスカットによる決済。取引所のドキュメントでは、注文イベントの `settleType` にだけ挙がっている。
+        LossCut = "LOSS_CUT",
+    }
 );
 
 open_enum!(
     /// 応答側の `timeInForce`。
-    TimeInForce { Fak = "FAK", Fas = "FAS", Fok = "FOK", Sok = "SOK" }
+    TimeInForce {
+        /// 注文が一部約定したあと、未約定の残数量を失効とする条件。
+        Fak = "FAK",
+        /// 注文が一部約定したあと、未約定の残数量を有効とする条件。
+        Fas = "FAS",
+        /// 全数量がすぐに約定しなければ、全数量を失効とする条件。
+        Fok = "FOK",
+        /// 指値注文が Maker にならなければ、全数量を失効とする条件 (Post-only)。
+        Sok = "SOK",
+    }
 );
 
 open_enum!(
     /// `marginCallStatus`。
-    MarginCallStatus { Normal = "NORMAL", MarginCall = "MARGIN_CALL", Losscut = "LOSSCUT" }
+    MarginCallStatus {
+        /// 追加証拠金は発生していない。
+        Normal = "NORMAL",
+        /// 追加証拠金 (追証) が発生している。
+        MarginCall = "MARGIN_CALL",
+        /// ロスカットの状態。
+        Losscut = "LOSSCUT",
+    }
 );
 
 open_enum!(
     /// `cryptoShortfallStatus`。
-    CryptoShortfallStatus { Normal = "NORMAL", Shortfall = "SHORTFALL", Liquidation = "LIQUIDATION" }
+    CryptoShortfallStatus {
+        /// 代用暗号資産不足金は発生していない。
+        Normal = "NORMAL",
+        /// 代用暗号資産不足金が発生している。
+        Shortfall = "SHORTFALL",
+        /// 清算の状態。
+        Liquidation = "LIQUIDATION",
+    }
 );
 
 open_enum!(
     /// 入金・出金・振替レコードの `status`。
-    TransferStatus { Executed = "EXECUTED" }
+    TransferStatus {
+        /// 実行済み。
+        Executed = "EXECUTED",
+    }
 );
 
 open_enum!(
     /// 取引所手数料履歴の `feeType`。
     FeeType {
+        /// 取引所のレバレッジ手数料。
         LeverageFee = "LEVERAGE_FEE",
+        /// 現物取引の取引手数料の端数の返金。
         SpotFeeRefund = "SPOT_FEE_REFUND",
+        /// レバレッジ取引の取引手数料の端数の返金。`LEVERAGE_FEE` の返金ではない。
         LeverageFeeRefund = "LEVERAGE_FEE_REFUND",
     }
 );
 
 open_enum!(
     /// `orderEvents` の `msgType`。
-    OrderMsgType { New = "NOR", Replaced = "ROR", Canceled = "COR", Executed = "ER" }
+    ///
+    /// 取引所のドキュメントは値を挙げるだけで、各値の意味を説明していない。
+    OrderMsgType {
+        /// `NOR`。
+        New = "NOR",
+        /// `ROR`。
+        Replaced = "ROR",
+        /// `COR`。
+        Canceled = "COR",
+        /// `ER`。約定情報通知 (`executionEvents`) が送る `msgType` と同じ値。
+        Executed = "ER",
+    }
 );
 
 open_enum!(
     /// `executionEvents` の `msgType`。
-    ExecutionMsgType { Executed = "ER" }
+    ExecutionMsgType {
+        /// `ER`。約定情報通知が送る唯一の値。
+        Executed = "ER",
+    }
 );
 
 open_enum!(
     /// `positionEvents` の `msgType`。
-    PositionMsgType { Opened = "OPR", Updated = "UPR", LosscutUpdated = "ULR", Closed = "CPR" }
+    ///
+    /// 取引所のドキュメントは値を挙げるだけで、各値の意味を説明していない。
+    PositionMsgType {
+        /// `OPR`。
+        Opened = "OPR",
+        /// `UPR`。
+        Updated = "UPR",
+        /// `ULR`。
+        LosscutUpdated = "ULR",
+        /// `CPR`。
+        Closed = "CPR",
+    }
 );
 
 open_enum!(
     /// `positionSummaryEvents` の `msgType`。
-    SummaryMsgType { Init = "INIT", Update = "UPDATE", Periodic = "PERIODIC" }
+    ///
+    /// 取引所のドキュメントは `INIT` と `UPDATE` の意味を説明していない。
+    SummaryMsgType {
+        /// `INIT`。
+        Init = "INIT",
+        /// `UPDATE`。
+        Update = "UPDATE",
+        /// `PERIODIC`。購読の `option` に `PERIODIC` を指定したときの定期送信 (5 秒ごと)。
+        Periodic = "PERIODIC",
+    }
 );
 
 #[cfg(test)]

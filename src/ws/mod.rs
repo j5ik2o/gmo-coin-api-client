@@ -47,11 +47,15 @@ pub trait FeedChannel: codec::Codec + Clone + Send + 'static {}
 /// `Trades { taker_only: true }` は `Trades { taker_only: false }` を置き換える。
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum PublicChannel {
+    /// `ticker`。銘柄ごとの最新レート。
     Ticker(Symbol),
+    /// `orderbooks`。銘柄ごとの板のスナップショット。
     OrderBooks(Symbol),
     /// `taker_only` は `option: "TAKER_ONLY"` を送る。
     Trades {
+        /// 対象の銘柄。
         symbol: Symbol,
+        /// `true` なら `option: "TAKER_ONLY"` を送る。
         taker_only: bool,
     },
 }
@@ -59,11 +63,15 @@ pub enum PublicChannel {
 /// Private チャネル。接続ごとに各 1 つ。
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum PrivateChannel {
+    /// `executionEvents`。約定情報の通知。
     ExecutionEvents,
+    /// `orderEvents`。注文情報の通知。
     OrderEvents,
+    /// `positionEvents`。ポジション情報の通知。
     PositionEvents,
     /// `periodic` は `option: "PERIODIC"` を送る (5 秒ごとのサマリー)。
     PositionSummaryEvents {
+        /// `true` なら `option: "PERIODIC"` を送る。
         periodic: bool,
     },
 }
@@ -75,8 +83,11 @@ impl FeedChannel for PrivateChannel {}
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum PublicEvent {
+    /// `ticker` の最新レート。
     Ticker(Ticker),
+    /// `orderbooks` のスナップショット。
     OrderBook(OrderBookUpdate),
+    /// `trades` の約定。
     Trade(TradeEvent),
     /// 接続が落ちた。`Reconnected` まで何も届かない。ストリームから導いた
     /// データ (ローカルの板) はここから先は古い。
@@ -134,7 +145,9 @@ pub enum PublicEvent {
     /// しない。文章の長さはモデルの不一致ではなく、フィードを閉じる理由に
     /// ならないからである。
     Rejected {
+        /// 拒否されたコマンドのチャネル。上の説明の条件を満たさないときは `None`。
         channel: Option<PublicChannel>,
+        /// サーバが送った文章。512 バイトを超える分は切り捨てる。
         text: Box<str>,
     },
 }
@@ -143,17 +156,24 @@ pub enum PublicEvent {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum PrivateEvent {
+    /// `executionEvents` の約定通知。
     Execution(ExecutionEvent),
+    /// `orderEvents` の注文通知。
     Order(OrderEvent),
+    /// `positionEvents` のポジション通知。
     Position(PositionEvent),
+    /// `positionSummaryEvents` のポジションサマリー通知。
     PositionSummary(PositionSummaryEvent),
     /// Public と同じ。切断中の約定は再生されない: `Reconnected` の後に
     /// `latest_executions` と `active_orders` を呼ぶこと。
     Disconnected(Disconnect),
+    /// 新しい接続が上がり、購読が再生されつつある。切断中のメッセージは失われている。
     Reconnected,
     /// [`PublicEvent::Rejected`] と同じ規則。
     Rejected {
+        /// 拒否されたコマンドのチャネル。[`PublicEvent::Rejected`] の説明の条件を満たさないときは `None`。
         channel: Option<PrivateChannel>,
+        /// サーバが送った文章。512 バイトを超える分は切り捨てる。
         text: Box<str>,
     },
 }
@@ -161,10 +181,13 @@ pub enum PrivateEvent {
 /// 接続が落ちた理由と、次の試行がいつ始まるか。
 #[derive(Debug)]
 pub struct Disconnect {
+    /// 切断の理由。
     pub reason: DisconnectReason,
+    /// 次の接続試行までの待ち時間。
     pub retry_in: Duration,
 }
 
+/// 接続が落ちた理由。`#[non_exhaustive]` なので、新しい理由が増え得る。
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum DisconnectReason {
@@ -179,7 +202,10 @@ pub enum DisconnectReason {
     /// 502/504 など)。
     Protocol(ProtocolError),
     /// サーバが close フレームを送った。
-    ServerClosed { code: Option<u16> },
+    ServerClosed {
+        /// close フレームのコード。付いていなければ `None`。
+        code: Option<u16>,
+    },
     /// ハンドシェイクで HTTP 503: 文書化されたメンテナンスの答え。
     Maintenance,
     /// ハンドシェイクが 101 でも 503 でもない HTTP 状態で拒否された。Private
@@ -187,7 +213,10 @@ pub enum DisconnectReason {
     /// 次の試行でトークンを取り直す。取り直したトークンまで拒まれたら
     /// `next` は `Protocol(WsHandshake)` で終わる (設定の問題であり、
     /// 発行を続けると同じキーを使う別プロセスのトークンを追い出すため)。
-    HandshakeRejected { http_status: u16 },
+    HandshakeRejected {
+        /// ハンドシェイクを拒否した HTTP 状態コード。
+        http_status: u16,
+    },
 }
 
 /// 1 本の購読ストリーム。遅延して構築される: 最初の `next` まで I/O はない。

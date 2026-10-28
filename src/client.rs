@@ -133,8 +133,11 @@ impl Client<Anonymous> {
 /// 「上限なし」を表す方法はない。
 #[derive(Clone, Debug)]
 pub struct Config {
+    /// 各通信段階のタイムアウト。
     pub timeouts: Timeouts,
+    /// サイズと本数の上限。
     pub limits: Limits,
+    /// フィードの再接続間隔。
     pub reconnect: Backoff,
 }
 
@@ -170,11 +173,15 @@ impl Default for Config {
 /// ping を送るので、150 秒の沈黙は ping が 2 回失われたことを意味する)。
 #[derive(Clone, Copy, Debug)]
 pub struct Timeouts {
+    /// 接続の確立のタイムアウト。
     pub connect: Timeout,
     /// REST のやり取り全体: 書き込み、待機、本文の読み切り。
     pub request: Timeout,
+    /// WebSocket ハンドシェイクのタイムアウト。
     pub ws_handshake: Timeout,
+    /// WebSocket への書き込みのタイムアウト。
     pub ws_write: Timeout,
+    /// WebSocket のアイドル (受信がない状態) のタイムアウト。
     pub ws_idle: Timeout,
 }
 
@@ -184,6 +191,7 @@ pub struct Timeouts {
 pub struct Timeout(Duration);
 
 impl Timeout {
+    /// `Timeout` に許される最大の長さ (10 分)。
     pub const MAX: Duration = Duration::from_secs(600);
 
     /// タイムアウト。
@@ -206,6 +214,7 @@ impl Timeout {
         Ok(Self(d))
     }
 
+    /// 設定された長さを返す。
     pub fn get(self) -> Duration {
         self.0
     }
@@ -221,7 +230,9 @@ pub struct Limits {
     /// tungstenite の `max_message_size` と `max_frame_size` に渡され、
     /// ペイロードを読む前にフレームヘッダの長さに対して検査される。
     pub max_ws_message_bytes: ByteLimit,
+    /// REST ベースごとに保持するアイドル接続の最大本数。
     pub max_idle_connections: u8,
+    /// フィードごとの購読数の上限。
     pub max_subscriptions: u8,
 }
 
@@ -231,6 +242,7 @@ pub struct Limits {
 pub struct ByteLimit(NonZeroU32);
 
 impl ByteLimit {
+    /// `ByteLimit` に許される最大のバイト数 (64 MiB)。
     pub const MAX: u32 = 64 * 1024 * 1024;
 
     /// バイト数の上限。
@@ -253,6 +265,7 @@ impl ByteLimit {
         }
     }
 
+    /// 設定されたバイト数を返す。常に 1 以上である。
     pub fn get(self) -> u32 {
         self.0.get()
     }

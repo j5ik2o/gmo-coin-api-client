@@ -34,25 +34,37 @@ use crate::error::{ApiMessage, Postcondition, ProtocolErrorKind, Result};
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Order {
+    /// 親注文 ID。
     pub root_order_id: OrderId,
+    /// 注文 ID。
     pub order_id: OrderId,
     /// 注文時に指定したときだけ存在する。
     pub client_order_id: Option<ClientOrderId>,
+    /// 取扱銘柄。
     pub symbol: Symbol,
+    /// 売買区分。
     pub side: Side,
+    /// 取引区分。
     pub order_type: OrderType,
+    /// 注文タイプ。
     pub execution_type: ExecutionType,
+    /// 決済区分。
     pub settle_type: SettleType,
+    /// 発注数量。
     pub size: Size,
+    /// 約定数量。
     pub executed_size: Size,
     /// MARKET 注文では存在しない。
     pub price: Option<Price>,
     /// 現物注文と未設定のときは `"0"`。
     pub losscut_price: Price,
+    /// 注文ステータス。逆指値注文では `WAITING` が有効。
     pub status: OrderStatus,
     /// CANCELLING、CANCELED、EXPIRED のときだけ存在する。
     pub cancel_type: Option<CancelType>,
+    /// 執行数量条件。
     pub time_in_force: TimeInForce,
+    /// 注文日時。
     pub timestamp: Timestamp,
 }
 
@@ -60,19 +72,29 @@ pub struct Order {
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Execution {
+    /// 約定 ID。
     pub execution_id: ExecutionId,
+    /// 注文 ID。
     pub order_id: OrderId,
+    /// 顧客注文 ID。設定した場合のみ返る。該当しないときは `None`。
     pub client_order_id: Option<ClientOrderId>,
     /// レバレッジのみ。
     pub position_id: Option<PositionId>,
+    /// 取扱銘柄。
     pub symbol: Symbol,
+    /// 売買区分。
     pub side: Side,
+    /// 決済区分。
     pub settle_type: SettleType,
+    /// 約定数量。
     pub size: Size,
+    /// 約定レート。
     pub price: Price,
+    /// 決済損益。
     pub loss_gain: Decimal,
     /// taker は正、maker は負。
     pub fee: Decimal,
+    /// 約定日時。
     pub timestamp: Timestamp,
 }
 
@@ -80,17 +102,26 @@ pub struct Execution {
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Position {
+    /// 建玉 ID。
     pub position_id: PositionId,
+    /// レバレッジ取扱銘柄。
     pub symbol: Symbol,
+    /// 売買区分。
     pub side: Side,
+    /// 建玉数量。
     pub size: Size,
     /// ワイヤ上の綴りは `orderdSize`。
     #[serde(rename = "orderdSize")]
     pub ordered_size: Size,
+    /// 建玉レート。
     pub price: Price,
+    /// 評価損益。
     pub loss_gain: Decimal,
+    /// レバレッジ。
     pub leverage: Decimal,
+    /// ロスカットレート。
     pub losscut_price: Price,
+    /// 約定日時。
     pub timestamp: Timestamp,
 }
 
@@ -98,11 +129,17 @@ pub struct Position {
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PositionSummary {
+    /// レバレッジ取扱銘柄。
     pub symbol: Symbol,
+    /// 売買区分。
     pub side: Side,
+    /// 平均建玉レート。
     pub average_position_rate: Price,
+    /// 評価損益。
     pub position_loss_gain: Decimal,
+    /// 発注中数量。
     pub sum_order_quantity: Size,
+    /// 建玉数量。
     pub sum_position_quantity: Size,
 }
 
@@ -224,9 +261,12 @@ fn check_cancel_outcome(
     })
 }
 
+/// `cancelOrders` で取消受付に失敗した注文 1 件。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CancelRejection {
+    /// 取消受付に失敗した注文 ID。
     pub order_id: OrderId,
+    /// 取引所が返した失敗情報。
     pub message: ApiMessage,
 }
 

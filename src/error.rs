@@ -1,4 +1,4 @@
-//! このクレート唯一のエラー型。
+//! このクレートのエラーをまとめる型 [`Error`] と、その詳細の型。
 //!
 //! すべての variant は「誰の責任か」と「何かが送られたか」に答える。
 //!
@@ -24,8 +24,11 @@ use std::io;
 
 use crate::domain::{ExecutionId, InvalidValue, OrderId, Timestamp};
 
+/// このクレートの公開 API が返す `Result`。エラー型の既定値は [`Error`] である。
 pub type Result<T, E = Error> = core::result::Result<T, E>;
 
+/// このクレートのエラーをまとめる型。どの variant かで責任の所在が分かる (モジュールの表を参照)。
+/// [`InvalidValue`] や [`ContractViolation`] を直接返す API もあり、どちらも `From` でこの型に変換できる。
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {
@@ -121,7 +124,10 @@ pub enum ContractViolation {
     /// `closeOrder`、`closeBulkOrder`、`openPositions` はレバレッジ銘柄のみ。
     RequiresLeverageSymbol,
     /// フィードが既に `Limits::max_subscriptions` 件のチャネルを持っている。
-    TooManySubscriptions { max: u8 },
+    TooManySubscriptions {
+        /// フィードが上限として許す購読数 (`Limits::max_subscriptions`)。
+        max: u8,
+    },
 }
 
 impl fmt::Display for ContractViolation {
@@ -172,6 +178,7 @@ pub struct ApiError {
 }
 
 impl ApiError {
+    /// エラーが起きた操作の名前。`"POST /v1/order"` のようにメソッドとパスから成る。
     pub fn operation(&self) -> &'static str {
         self.operation
     }
@@ -181,10 +188,12 @@ impl ApiError {
         self.status
     }
 
+    /// 取引所が返したメッセージ。空でない。
     pub fn messages(&self) -> &[ApiMessage] {
         &self.messages
     }
 
+    /// `code` を持つメッセージが 1 件でも含まれているか。
     pub fn has(&self, code: ErrorCode) -> bool {
         self.messages.iter().any(|m| m.code == code)
     }
@@ -215,6 +224,7 @@ impl std::error::Error for ApiError {}
 /// `cancelOrders` の失敗エントリから来る。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ApiMessage {
+    /// 取引所が返したエラーコード。
     pub code: ErrorCode,
     /// サーバが書いた文章。最大 512 バイト (それより長ければ `Protocol` エラー)。
     pub text: Box<str>,
@@ -227,56 +237,107 @@ pub struct ApiMessage {
 pub struct ErrorCode(pub u32);
 
 impl ErrorCode {
+    /// ERR-70。決済注文で、指定した建玉の売買区分が誤っている。
     pub const WRONG_POSITION_SIDE: ErrorCode = ErrorCode(70);
+    /// ERR-189。決済注文の数量が、決済可能な保有数量を超えている。
     pub const CLOSE_SIZE_OVER_POSITION: ErrorCode = ErrorCode(189);
+    /// ERR-200。すでに有効注文があり、注文数量が発注可能な数量を超えている。決済注文をしたい場合は、数量を変えるか、有効注文を取り消してから再度注文する。
     pub const ACTIVE_ORDERS_EXCEED_SIZE: ErrorCode = ErrorCode(200);
+    /// ERR-201。注文時に取引余力が不足している。
     pub const INSUFFICIENT_BALANCE: ErrorCode = ErrorCode(201);
+    /// ERR-208。注文可能な保有数量が不足している。保有数量と有効注文を確認する。
     pub const INSUFFICIENT_HOLDINGS: ErrorCode = ErrorCode(208);
+    /// ERR-254。指定した建玉が存在しない。
     pub const POSITION_NOT_FOUND: ErrorCode = ErrorCode(254);
+    /// ERR-422。一括決済注文で、建玉が存在しない。銘柄と売買区分を確認する。
     pub const BULK_CLOSE_NO_POSITION: ErrorCode = ErrorCode(422);
+    /// ERR-423。一括決済注文の数量が、決済可能な建玉の合計数量を超えている。
     pub const BULK_CLOSE_SIZE_OVER_POSITIONS: ErrorCode = ErrorCode(423);
+    /// ERR-430。約定情報の取得で、`orderId` と `executionId` の指定が不正である。
     pub const INVALID_EXECUTION_LOOKUP: ErrorCode = ErrorCode(430);
+    /// ERR-554。サーバーが利用できない状態である。
     pub const SERVER_UNAVAILABLE: ErrorCode = ErrorCode(554);
+    /// ERR-626。サーバーへのアクセスが集中している。しばらく待ってから再試行する。
     pub const SERVER_BUSY: ErrorCode = ErrorCode(626);
+    /// ERR-635。有効注文の件数が上限に達している。有効注文を取り消してから再度注文する。
     pub const ACTIVE_ORDER_LIMIT: ErrorCode = ErrorCode(635);
+    /// ERR-682。追加証拠金が発生しているため、指定した操作を実行できない。
     pub const MARGIN_CALL_IN_EFFECT: ErrorCode = ErrorCode(682);
+    /// ERR-683。追加証拠金の処理が実行中のため、指定した操作を実行できない。
     pub const MARGIN_CALL_PROCESSING: ErrorCode = ErrorCode(683);
+    /// ERR-754。振替可能額より大きい値を振り替えようとした。
     pub const TRANSFER_OVER_TRANSFERABLE: ErrorCode = ErrorCode(754);
+    /// ERR-846。`fromTimestamp` と `toTimestamp` の差が最大 30 分を超えている。
     pub const HISTORY_RANGE_TOO_WIDE: ErrorCode = ErrorCode(846);
+    /// ERR-913。代用数量の全量を売却するか、売却後の代用数量が最小代用数量以上になるように売却する必要がある。
     pub const COLLATERAL_MINIMUM: ErrorCode = ErrorCode(913);
+    /// ERR-915。注文、決済注文、一括決済注文で、指定した `clientOrderId` がすでに使われている。
     pub const CLIENT_ORDER_ID_USED: ErrorCode = ErrorCode(915);
+    /// ERR-5003。API の呼び出し上限を超えた。
     pub const RATE_LIMIT: ErrorCode = ErrorCode(5003);
+    /// ERR-5007。`API-TIMESTAMP` ヘッダがない、または値が数値でない。
     pub const TIMESTAMP_MISSING: ErrorCode = ErrorCode(5007);
+    /// ERR-5008。`API-TIMESTAMP` が公開 API のシステム時刻より遅い。
     pub const TIMESTAMP_TOO_LATE: ErrorCode = ErrorCode(5008);
+    /// ERR-5009。`API-TIMESTAMP` が公開 API のシステム時刻より早い。
     pub const TIMESTAMP_TOO_EARLY: ErrorCode = ErrorCode(5009);
+    /// ERR-5010。`API-SIGN` (署名) が不正である。
     pub const BAD_SIGNATURE: ErrorCode = ErrorCode(5010);
+    /// ERR-5011。`API-KEY` ヘッダが設定されていない。
     pub const API_KEY_MISSING: ErrorCode = ErrorCode(5011);
+    /// ERR-5012。`API-KEY` が認証エラーになった場合などに返る。
     pub const API_KEY_REJECTED: ErrorCode = ErrorCode(5012);
+    /// ERR-5014。同意が必要な処理で、未確認または未同意の事項がある。
     pub const CONSENT_REQUIRED: ErrorCode = ErrorCode(5014);
+    /// ERR-5016。履歴取得処理がタイムアウトした。再実行するか、期間を狭める。
     pub const HISTORY_TIMEOUT: ErrorCode = ErrorCode(5016);
+    /// ERR-5106。パラメーターが不正である。
     pub const INVALID_PARAMETER: ErrorCode = ErrorCode(5106);
+    /// ERR-5111。リクエストボディの `timeInForce` が誤っている。
     pub const INVALID_TIME_IN_FORCE: ErrorCode = ErrorCode(5111);
+    /// ERR-5114。小数点以下の桁数が有効桁数を超えている。
     pub const TOO_MANY_DECIMALS: ErrorCode = ErrorCode(5114);
+    /// ERR-5118。リクエストボディに `losscutPrice` を指定できない。
     pub const LOSSCUT_NOT_ALLOWED: ErrorCode = ErrorCode(5118);
+    /// ERR-5121。注文価格が低すぎて注文できない。
     pub const PRICE_TOO_LOW: ErrorCode = ErrorCode(5121);
+    /// ERR-5122。注文がすでに変更中、取消中、取消済、全量約定、失効のいずれかで、変更も取消もできない。
     pub const ORDER_NOT_MODIFIABLE: ErrorCode = ErrorCode(5122);
+    /// ERR-5123。指定した注文番号が存在しない。
     pub const ORDER_NOT_FOUND: ErrorCode = ErrorCode(5123);
+    /// ERR-5125。API の取引規制がかかっている。
     pub const API_TRADING_RESTRICTED: ErrorCode = ErrorCode(5125);
+    /// ERR-5126。1 回あたりの最大注文数量を超えている、または最小注文数量を下回っている。
     pub const SIZE_OUT_OF_RANGE: ErrorCode = ErrorCode(5126);
+    /// ERR-5127。お客様に取引規制がかかっている。
     pub const ACCOUNT_TRADING_RESTRICTED: ErrorCode = ErrorCode(5127);
+    /// ERR-5129。逆指値注文で、即座に約定する価格が指定された。
     pub const STOP_PRICE_WOULD_EXECUTE: ErrorCode = ErrorCode(5129);
+    /// ERR-5130。注文情報取得、約定情報取得、注文の複数キャンセルで、指定した `orderId` が上限の件数を超えている。
     pub const TOO_MANY_ORDER_IDS: ErrorCode = ErrorCode(5130);
+    /// ERR-5132。約定情報取得で、指定した `executionId` が上限の件数を超えている。
     pub const TOO_MANY_EXECUTION_IDS: ErrorCode = ErrorCode(5132);
+    /// ERR-5133。振替規制中のため、口座振替ができない。
     pub const TRANSFER_RESTRICTED: ErrorCode = ErrorCode(5133);
+    /// ERR-5135。外国為替 FX 用の口座が開設されていない状態で口座振替をした。
     pub const FX_ACCOUNT_MISSING: ErrorCode = ErrorCode(5135);
+    /// ERR-5145。注文情報取得、約定情報取得で、指定した `clientOrderId` が上限の件数を超えている。
     pub const TOO_MANY_CLIENT_ORDER_IDS: ErrorCode = ErrorCode(5145);
+    /// ERR-5201。定期メンテナンス中に Public/Private API を呼び出した。
     pub const SCHEDULED_MAINTENANCE: ErrorCode = ErrorCode(5201);
+    /// ERR-5202。緊急メンテナンス中に Public/Private API を呼び出した。
     pub const EMERGENCY_MAINTENANCE: ErrorCode = ErrorCode(5202);
+    /// ERR-5203。取引所のプレオープン中に注文または注文変更をした。
     pub const PRE_OPEN: ErrorCode = ErrorCode(5203);
+    /// ERR-5204。リクエスト先の API の URL が不正である。
     pub const INVALID_URL: ErrorCode = ErrorCode(5204);
+    /// ERR-5206。注文ごとの変更可能回数が上限に達している。取消してから新規に注文する。
     pub const CHANGE_LIMIT_REACHED: ErrorCode = ErrorCode(5206);
+    /// ERR-5207。リクエストボディの `symbol`、`interval`、`date` のいずれかが不正である。
     pub const INVALID_SYMBOL_INTERVAL_DATE: ErrorCode = ErrorCode(5207);
+    /// ERR-5208。約定情報取得で、`orderId` と `executionId` が両方指定された。
     pub const BOTH_ORDER_AND_EXECUTION_ID: ErrorCode = ErrorCode(5208);
+    /// ERR-5212。注文情報取得、約定情報取得で、`orderId` と `clientOrderId` が同時に指定された。
     pub const BOTH_ORDER_AND_CLIENT_ORDER_ID: ErrorCode = ErrorCode(5212);
 
     /// `ERR-<1 から 5 桁の数字>` を解析する。それ以外は `Protocol` エラーになる。
@@ -292,9 +353,13 @@ impl ErrorCode {
 /// 操作が属する 4 つの API のどれか。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ApiGroup {
+    /// 公開 REST API。
     PublicRest,
+    /// 認証が必要な REST API。
     PrivateRest,
+    /// 公開 WebSocket API。
     PublicWs,
+    /// 認証が必要な WebSocket API。
     PrivateWs,
 }
 
@@ -309,6 +374,7 @@ impl fmt::Display for ApiGroup {
     }
 }
 
+/// 取引所の答えが文書化された形でなかった、または答えに対する事後条件が満たされなかった。
 #[derive(Debug)]
 pub struct ProtocolError {
     pub(crate) api: ApiGroup,
@@ -317,12 +383,16 @@ pub struct ProtocolError {
 }
 
 impl ProtocolError {
+    /// 操作が属する API。
     pub fn api(&self) -> ApiGroup {
         self.api
     }
+    /// エラーが起きた操作の名前。[`api`](Self::api) が REST なら `"POST /v1/order"` のように
+    /// メソッドとパスから成り、WebSocket ならハンドシェイクのパス `"/v1"` である。
     pub fn operation(&self) -> &'static str {
         self.operation
     }
+    /// 何が規約に反したかの種類。
     pub fn kind(&self) -> &ProtocolErrorKind {
         &self.kind
     }
@@ -378,6 +448,7 @@ impl fmt::Display for ProtocolError {
 
 impl std::error::Error for ProtocolError {}
 
+/// [`ProtocolError`] の原因。`Shape` と `WsMessage` は位置 (行と列) だけを持ち、問題の JSON 値は持たない。
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ProtocolErrorKind {
@@ -392,13 +463,26 @@ pub enum ProtocolErrorKind {
     MissingData,
     /// `data` が文書化された形と一致しない。位置だけ: serde のメッセージは
     /// 値を引用するので捨てる。
-    Shape { line: usize, column: usize },
+    Shape {
+        /// `data` の中で不一致が見つかった行 (1 始まり)。
+        line: usize,
+        /// `data` の中で不一致が見つかった列 (1 始まり)。
+        column: usize,
+    },
     /// 解析済みの答えに対する事後条件が満たされなかった。
     Postcondition(Postcondition),
     /// WebSocket ハンドシェイクが `101` 以外で答えた。
-    WsHandshake { http_status: u16 },
+    WsHandshake {
+        /// ハンドシェイクの応答が返した HTTP 状態コード。
+        http_status: u16,
+    },
     /// 購読中のチャネルの WebSocket テキストメッセージがデコードできなかった。
-    WsMessage { line: usize, column: usize },
+    WsMessage {
+        /// デコードに失敗した位置の行 (1 始まり)。
+        line: usize,
+        /// デコードに失敗した位置の列 (1 始まり)。
+        column: usize,
+    },
 }
 
 impl ProtocolErrorKind {
@@ -435,11 +519,17 @@ pub enum Postcondition {
     /// `executions(..)` が、検索で指定していない約定を返した。
     ExecutionNotRequested(ExecutionId),
     /// `cancel_bulk_orders` が、1 回の上限 (10 件) を超える id を返した。
-    BulkCancelTooManyIds { actual: usize },
+    BulkCancelTooManyIds {
+        /// 取引所が返した id の件数。
+        actual: usize,
+    },
     /// `cancel_bulk_orders` が同じ id を二度返した。
     BulkCancelIdRepeated(OrderId),
     /// 1 件のはずの `data` 配列 (`account/transfer`) が別の長さだった。
-    ExpectedOneEntry { actual: usize },
+    ExpectedOneEntry {
+        /// 実際に返ってきたエントリの件数。
+        actual: usize,
+    },
 }
 
 impl fmt::Display for Postcondition {
@@ -474,6 +564,7 @@ impl fmt::Display for Postcondition {
     }
 }
 
+/// 通信の失敗。原因の種類は [`TransportErrorKind`] が表す。
 #[derive(Debug)]
 pub struct TransportError {
     pub(crate) api: ApiGroup,
@@ -483,15 +574,20 @@ pub struct TransportError {
 }
 
 impl TransportError {
+    /// 失敗した API。
     pub fn api(&self) -> ApiGroup {
         self.api
     }
+    /// 失敗した操作の名前。[`api`](Self::api) が REST なら `"POST /v1/order"` のように
+    /// メソッドとパスから成り、WebSocket ならハンドシェイクのパス `"/v1"` である。
     pub fn operation(&self) -> &'static str {
         self.operation
     }
+    /// 失敗の種類。
     pub fn kind(&self) -> &TransportErrorKind {
         &self.kind
     }
+    /// リクエストが取引所に届いた可能性があるか。[`Error::outcome_unknown`] の判断の元になる。
     pub fn delivery(&self) -> Delivery {
         self.delivery
     }
@@ -536,15 +632,19 @@ pub enum Delivery {
     MaybeSent,
 }
 
+/// [`TransportError`] の原因。
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum TransportErrorKind {
     /// 種類だけ。`io::Error` のペイロードは任意の文章を持ち得る。
     Io(io::ErrorKind),
+    /// TLS ハンドシェイクに失敗した。
     Tls,
+    /// どの段階でタイムアウトしたか。
     Timeout(Phase),
     /// `Limits` のサイズ上限を、データをバッファする前に超えた。
     TooLarge {
+        /// 超えたサイズ上限 (バイト)。
         limit: u32,
     },
     /// サーバからの HTTP または WebSocket のフレーミングが不正だった。
@@ -553,12 +653,18 @@ pub enum TransportErrorKind {
     ClosedEarly,
 }
 
+/// タイムアウトが起きた通信の段階。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
+    /// 接続の確立。
     Connect,
+    /// HTTP リクエスト。
     Request,
+    /// WebSocket ハンドシェイク。
     WsHandshake,
+    /// WebSocket の書き込み。
     WsWrite,
+    /// WebSocket のアイドル (受信がない状態)。
     WsIdle,
 }
 
