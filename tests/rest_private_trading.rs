@@ -297,6 +297,50 @@ async fn executions_use_one_query_key_per_lookup_kind() {
     mock.assert_done();
 }
 
+/// 公式ドキュメントの応答例は、注文の異なる約定を 2 件含む。これは約定 ID を
+/// 2 つ指定した照会への返答であり、その照会では事後条件を通って 2 件とも
+/// デコードされる (issue #8)。
+#[tokio::test]
+async fn the_official_executions_example_answers_a_lookup_by_its_two_execution_ids() {
+    let mock = MockExchange::start().await;
+    mock.on("GET", "/private/v1/executions")
+        .signed()
+        .query("executionId=72123911,92123912")
+        .times(1)
+        .fixture("private_get_executions.json");
+    let ids = Batch::new(vec![
+        ExecutionId::new(72123911).unwrap(),
+        ExecutionId::new(92123912).unwrap(),
+    ])
+    .unwrap();
+
+    let executions = authed(&mock)
+        .executions(&ExecutionLookup::ByExecutionIds(ids))
+        .await
+        .expect("the example answers a lookup by its execution ids");
+
+    let decoded: Vec<_> = executions
+        .iter()
+        .map(|e| (e.execution_id, e.order_id, e.price.to_string()))
+        .collect();
+    assert_eq!(
+        decoded,
+        [
+            (
+                ExecutionId::new(92123912).unwrap(),
+                oid(223456789),
+                "1900000".to_owned()
+            ),
+            (
+                ExecutionId::new(72123911).unwrap(),
+                oid(123456789),
+                "877404".to_owned()
+            ),
+        ]
+    );
+    mock.assert_done();
+}
+
 #[tokio::test]
 async fn an_execution_that_does_not_match_the_lookup_fails_the_postcondition() {
     let stray_id = ExecutionId::new(72123911).unwrap();

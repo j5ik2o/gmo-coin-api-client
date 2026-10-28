@@ -934,25 +934,48 @@ async fn a_rejected_subscribe_is_dropped_until_the_caller_subscribes_again() {
     feed.close().await.unwrap();
 }
 
-/// 静かな Private チャネル (`orderEvents`) を subscribe し、モックに届いてから
-/// `delay` 置いて、サーバが自発的に送った形の拒否を push する。返るのは
-/// `Rejected` の `channel` と、その後に push した orderEvents が届いたか
-/// (購読が集合に残っていれば届く)。
-async fn unsolicited_rejection_after(delay: Duration) -> (Option<PrivateChannel>, bool) {
+/// 拒否を読むまでの呼び出し側の振る舞い。
+enum Caller {
+    /// `next` で待ち続ける。拒否は subscribe がモックに届いてから
+    /// `rejection_after` 後に届く。
+    Waiting { rejection_after: Duration },
+    /// subscribe がモックに届いたところで `next` を打ち切る (キャンセル)。
+    /// 拒否はすぐ届き、呼び出し側は `returns_after` 後に `next` に戻る。
+    Away { returns_after: Duration },
+}
+
+/// 静かな Private チャネル (`orderEvents`) を subscribe し、`caller` のとおりに
+/// 駆動して、サーバが送った形の拒否を読む。返るのは `Rejected` の `channel`
+/// と、その後に push した orderEvents が届いたか (購読が集合に残っていれば
+/// 届く) と、接続を落として再接続した後までにモックが受けた orderEvents の
+/// subscribe の総数 (購読が集合に残っていれば再接続で送り直す)。
+async fn rejection_of_a_quiet_subscribe(caller: Caller) -> (Option<PrivateChannel>, bool, usize) {
     let mock = MockExchange::start().await;
     let ws = mock.ws();
     let client = fast_client(&mock, |_| {}).authenticate(MockExchange::credentials());
     let mut feed = client.private_feed();
     feed.subscribe(PrivateChannel::OrderEvents).unwrap();
+    let rejection = fixture("live/ws_public_error.json");
 
-    let driver = tokio::spawn(async move {
-        let event = feed.next().await;
-        (feed, event)
-    });
-    ws.subscribed(Api::Private, "orderEvents", None, WAIT).await;
-    tokio::time::sleep(delay).await;
-    ws.push(Api::Private, &fixture("live/ws_public_error.json"));
-    let (mut feed, event) = driver.await.unwrap();
+    let event = match caller {
+        Caller::Waiting { rejection_after } => {
+            let exchange = async {
+                ws.subscribed(Api::Private, "orderEvents", None, WAIT).await;
+                tokio::time::sleep(rejection_after).await;
+                ws.push(Api::Private, &rejection);
+            };
+            tokio::join!(feed.next(), exchange).0
+        }
+        Caller::Away { returns_after } => {
+            tokio::select! {
+                event = feed.next() => panic!("no event before the caller leaves: {event:?}"),
+                _ = ws.subscribed(Api::Private, "orderEvents", None, WAIT) => {}
+            }
+            ws.push(Api::Private, &rejection);
+            tokio::time::sleep(returns_after).await;
+            feed.next().await
+        }
+    };
     let channel = match event.unwrap() {
         PrivateEvent::Rejected { channel, text } => {
             assert_eq!(&*text, "ERR-5106 Invalid request parameter. channel");
@@ -967,26 +990,65 @@ async fn unsolicited_rejection_after(delay: Duration) -> (Option<PrivateChannel>
         Ok(other) => panic!("{other:?}"),
         Err(_elapsed) => false,
     };
+
+    ws.drop_connections(Api::Private);
+    assert!(matches!(
+        feed.next().await,
+        Ok(PrivateEvent::Disconnected(_))
+    ));
+    assert!(matches!(feed.next().await, Ok(PrivateEvent::Reconnected)));
+    let _ = tokio::time::timeout(Duration::from_millis(500), feed.next()).await;
+    let subscribes = ws
+        .commands()
+        .iter()
+        .filter(|(_, _, c)| c["command"] == "subscribe" && c["channel"] == "orderEvents")
+        .count();
     feed.close().await.unwrap();
-    (channel, delivered)
+    (channel, delivered, subscribes)
 }
 
-/// 取引所は不正なコマンドにすぐ答えるので、書き込みの直後に届いた拒否は
-/// その subscribe のものとみなし、購読は集合から外れる。
+/// 取引所は不正なコマンドにすぐ答えるので、`next` で待っている間に書き込みの
+/// 直後に届いた拒否はその subscribe のものとみなし、購読は集合から外れる。
 #[tokio::test]
 async fn a_rejection_right_after_a_quiet_subscribe_is_attributed_to_it() {
-    let (channel, delivered) = unsolicited_rejection_after(Duration::ZERO).await;
+    let (channel, delivered, _) = rejection_of_a_quiet_subscribe(Caller::Waiting {
+        rejection_after: Duration::ZERO,
+    })
+    .await;
     assert_eq!(channel, Some(PrivateChannel::OrderEvents));
     assert!(!delivered, "the rejected subscribe left the desired set");
 }
 
-/// コマンドの間隔 (1.05 秒) を過ぎて届いた拒否は、どのコマンドのものとも
+/// `next` で待っている間に、書き込みからコマンドの間隔 (1.05 秒) を過ぎても
+/// ソケットが空なら、窓は閉じる。その後に届いた拒否はどのコマンドのものとも
 /// しない。`channel` は `None` で、静かなチャネルの購読は生き続ける。
 #[tokio::test]
 async fn a_rejection_after_the_window_names_no_channel_and_drops_nothing() {
-    let (channel, delivered) = unsolicited_rejection_after(Duration::from_millis(1300)).await;
+    let (channel, delivered, _) = rejection_of_a_quiet_subscribe(Caller::Waiting {
+        rejection_after: Duration::from_millis(1300),
+    })
+    .await;
     assert_eq!(channel, None);
     assert!(delivered, "the subscription stayed in the desired set");
+}
+
+/// `next` を呼ばずにいた間に届いた拒否は、窓の長さを過ぎてから読んでも、
+/// 窓の中に届いたかもしれないので、その subscribe に帰属する。拒否された
+/// subscribe は集合から外れ、再接続でも送り直さない (issue #6)。上の 1.3 秒の
+/// テストと待つ時間は同じで、違うのは呼び出し側がソケットを見ていたかどうか
+/// だけである。
+#[tokio::test]
+async fn a_prompt_rejection_read_after_the_caller_was_away_is_attributed_to_it() {
+    let (channel, delivered, subscribes) = rejection_of_a_quiet_subscribe(Caller::Away {
+        returns_after: Duration::from_millis(1300),
+    })
+    .await;
+    assert_eq!(channel, Some(PrivateChannel::OrderEvents));
+    assert!(!delivered, "the rejected subscribe left the desired set");
+    assert_eq!(
+        subscribes, 1,
+        "the reconnect did not replay the rejected subscribe"
+    );
 }
 
 /// 同じキーを置き換える subscribe は、古い購読のデータでは裏付けられない。
