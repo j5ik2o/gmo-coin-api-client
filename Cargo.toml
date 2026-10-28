@@ -28,6 +28,7 @@ hyper = { version = "1.12", default-features = false, features = ["client", "htt
 
 [lints.rust]
 unsafe_code = "forbid"
+missing_docs = "warn"
 unreachable_pub = "warn"
 unused_qualifications = "warn"
 missing_debug_implementations = "warn"
