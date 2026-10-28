@@ -21,13 +21,17 @@ mod support;
 
 use std::time::{Duration, Instant};
 
+use futures_util::StreamExt;
 use gmo_coin_api_client::error::{ErrorCode, Phase, ProtocolErrorKind, TransportErrorKind};
 use gmo_coin_api_client::ws::{
     DisconnectReason, PrivateChannel, PrivateEvent, PublicChannel, PublicEvent,
 };
-use gmo_coin_api_client::{Anonymous, Backoff, Client, Config, Error, Symbol, Timeout};
+use gmo_coin_api_client::{Anonymous, Backoff, Client, Config, Endpoints, Error, Symbol, Timeout};
 use support::ws::Api;
 use support::{MockExchange, Reply, api_error, fixture};
+use tokio::io::AsyncWriteExt;
+use tokio::net::TcpListener;
+use tokio::sync::oneshot;
 
 const WAIT: Duration = Duration::from_secs(5);
 
@@ -1172,4 +1176,74 @@ async fn a_server_close_frame_is_echoed_before_the_connection_is_dropped() {
 
     assert!(matches!(feed.next().await, Ok(PublicEvent::Reconnected)));
     feed.close().await.unwrap();
+}
+
+/// close の返答を flush している途中で `next` をキャンセルしても、切断の理由は
+/// 失われない。サーバは受信を止めたまま ping を送り続け、クライアントが返す
+/// pong で送信を詰まらせてから close (1000) を送る。flush で止まった `next` を
+/// 捨てたあとでサーバが受信を再開すると、次の `next` は `ServerClosed` を返す。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancelling_next_while_the_close_reply_is_flushed_keeps_the_close_reason() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (close_sent_tx, close_sent_rx) = oneshot::channel();
+    let (drain_tx, drain_rx) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+        let ping: Vec<u8> = [0x89, 125]
+            .into_iter()
+            .chain(std::iter::repeat_n(b'p', 125))
+            .collect();
+        let pings = ping.repeat(1000);
+        let tcp = ws.get_mut();
+        for _ in 0..200 {
+            tcp.write_all(&pings).await.unwrap();
+        }
+        tcp.write_all(&[0x88, 2, 0x03, 0xE8]).await.unwrap();
+        close_sent_tx.send(()).unwrap();
+        drain_rx.await.unwrap();
+        while let Some(Ok(message)) = ws.next().await {
+            if message.is_close() {
+                break;
+            }
+        }
+    });
+
+    let mut config = Config::default();
+    config.timeouts.ws_write = Timeout::new(Duration::from_secs(120)).unwrap();
+    config.timeouts.ws_idle = Timeout::new(Duration::from_secs(120)).unwrap();
+    let mut feed = Client::new(Endpoints::loopback(addr).unwrap(), config).public_feed();
+
+    let first = {
+        let next = std::pin::pin!(feed.next());
+        tokio::select! {
+            event = next => Some(event),
+            () = async {
+                close_sent_rx.await.unwrap();
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            } => None,
+        }
+    };
+    assert!(
+        first.is_none(),
+        "next must still be flushing the close reply when it is cancelled: {first:?}"
+    );
+
+    drain_tx.send(()).unwrap();
+    let second = tokio::time::timeout(Duration::from_secs(20), feed.next())
+        .await
+        .unwrap();
+    match second.unwrap() {
+        PublicEvent::Disconnected(d) => assert!(
+            matches!(
+                d.reason,
+                DisconnectReason::ServerClosed { code: Some(1000) }
+            ),
+            "{:?}",
+            d.reason
+        ),
+        other => panic!("{other:?}"),
+    }
+    tokio::time::timeout(WAIT, server).await.unwrap().unwrap();
 }
