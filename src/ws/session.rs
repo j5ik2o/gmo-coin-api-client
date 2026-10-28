@@ -501,9 +501,11 @@ impl<C: FeedChannel> Session<C> {
             _ => &inner.public_ws_pacer,
         };
         let timeouts = inner.config.timeouts;
-        if let Some(reason) = conn.closing.take() {
+        if conn.closing.is_some() {
             let _ = tokio::time::timeout(timeouts.ws_write.get(), conn.stream.flush()).await;
-            return Some(Ok(self.drop_connection(reason)));
+            if let Some(reason) = conn.closing.take() {
+                return Some(Ok(self.drop_connection(reason)));
+            }
         }
         let now = Instant::now();
 
