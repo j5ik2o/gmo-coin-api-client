@@ -171,12 +171,10 @@ fn check_bulk_cancel_ids(ids: &[OrderId]) -> core::result::Result<(), Postcondit
     if ids.len() > 10 {
         return Err(Postcondition::BulkCancelTooManyIds { actual: ids.len() });
     }
-    let mut remaining = ids;
-    while let Some((id, rest)) = remaining.split_first() {
-        if rest.contains(id) {
+    for (i, id) in ids.iter().enumerate() {
+        if ids.iter().take(i).any(|seen| seen == id) {
             return Err(Postcondition::BulkCancelIdRepeated(*id));
         }
-        remaining = rest;
     }
     Ok(())
 }
