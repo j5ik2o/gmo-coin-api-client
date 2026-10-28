@@ -1064,6 +1064,94 @@ async fn a_prompt_rejection_read_after_the_caller_was_away_is_attributed_to_it()
     );
 }
 
+/// tokio が 1 回のタスクのポーリングに与える予算の単位数。使い切ると、
+/// ソケットに読めるデータが残っていても読み込みは `Pending` を返す。
+async fn tokio_poll_budget() -> usize {
+    std::future::poll_fn(|cx| {
+        let mut units = 0_usize;
+        loop {
+            match tokio::task::coop::poll_proceed(cx) {
+                std::task::Poll::Ready(progress) => {
+                    progress.made_progress();
+                    units += 1;
+                    assert!(units <= 4096, "the cooperative budget is unbounded");
+                }
+                std::task::Poll::Pending => return std::task::Poll::Ready(units),
+            }
+        }
+    })
+    .await
+}
+
+/// 予算を 1 単位だけ残して使い切り、同じポーリングで `next` を読む。
+///
+/// ソケットの読み込みは 1 回で 1 単位を使う。フレームが途中なら 2 回目の
+/// 読み込みに移り、そこが予算の壁に当たると、読めるデータが残っていても
+/// `Pending` が返る。呼び出し側が別の tokio の資源で予算を使った後に
+/// `next` を読む、という普通の使い方で起きる。
+async fn next_with_one_budget_unit_left<C: gmo_coin_api_client::ws::FeedChannel>(
+    feed: &mut gmo_coin_api_client::ws::Feed<C>,
+) -> gmo_coin_api_client::Result<C::Event> {
+    let budget = tokio_poll_budget().await;
+    // 予算の計測でこのポーリングの分を使い切った。次のポーリングに入り直して
+    // 予算を満タンに戻す。
+    tokio::task::yield_now().await;
+    let mut next = std::pin::pin!(feed.next());
+    let mut spent = false;
+    std::future::poll_fn(|cx| {
+        if !spent {
+            spent = true;
+            for _ in 0..budget.saturating_sub(1) {
+                match tokio::task::coop::poll_proceed(cx) {
+                    std::task::Poll::Ready(progress) => progress.made_progress(),
+                    std::task::Poll::Pending => break,
+                }
+            }
+        }
+        next.as_mut().poll(cx)
+    })
+    .await
+}
+
+/// 予算切れの `Pending` は空のソケットではない。受信が途切れない接続で、
+/// 拒否が大きなフレームの後ろに並び、窓の期限を過ぎてから続けて読む場合でも、
+/// 拒否には購読したチャネルが付く (#16)。
+///
+/// 場面: 購読していない銘柄の 300KB のフレーム (1 回の読み込みに収まらない)
+/// のすぐ後ろに拒否を積み、窓の期限 (1.05 秒) を過ぎてから、予算を 1 単位
+/// 残して `next` を読む。修正前は、フレームの途中の読み込みが予算切れで
+/// `Pending` を返したところで窓が閉じ、拒否は `channel: None` になる。
+#[tokio::test]
+async fn a_read_stopped_by_the_cooperative_budget_does_not_close_the_rejection_window() {
+    let mock = MockExchange::start().await;
+    let ws = mock.ws();
+    let mut feed = fast_client(&mock, |_| {}).public_feed();
+    feed.subscribe(PublicChannel::Ticker(Symbol::ETH)).unwrap();
+
+    {
+        let mut next = std::pin::pin!(feed.next());
+        tokio::select! {
+            event = &mut next => panic!("no event before the subscribe: {event:?}"),
+            _ = ws.subscribed(Api::Public, "ticker", Some("ETH"), WAIT) => {}
+        }
+    }
+    let big = fixture("ws_public_ticker.json")
+        .replace("\"BTC\"", "\"XRP\"")
+        .replacen('{', &format!("{{\"pad\":\"{}\",", "x".repeat(300_000)), 1);
+    ws.push(Api::Public, &big);
+    ws.push(Api::Public, &fixture("live/ws_public_error.json"));
+    tokio::time::sleep(Duration::from_millis(1300)).await;
+
+    match next_with_one_budget_unit_left(&mut feed).await.unwrap() {
+        PublicEvent::Rejected { channel, text } => {
+            assert_eq!(channel, Some(PublicChannel::Ticker(Symbol::ETH)));
+            assert_eq!(&*text, "ERR-5106 Invalid request parameter. channel");
+        }
+        other => panic!("{other:?}"),
+    }
+    feed.close().await.unwrap();
+}
+
 /// 同じキーを置き換える subscribe は、古い購読のデータでは裏付けられない。
 /// 置き換えが拒否されたら、間に古いデータが流れていても拒否は置き換えに
 /// 帰属し、置き換えは集合から外れる。

@@ -61,11 +61,13 @@ pub(super) const OPERATION: &str = "/v1";
 /// いる限り、その中の拒否は窓の中に届いたかもしれないので、窓を閉じない。
 /// ただし、呼び出し側がランタイムのスレッドを塞いでいた場合は、tokio が最初の
 /// ポーリングで返すソケットの準備状況が古く、読み込みが `Pending` を返して窓が
-/// 閉じる。`next` の外で別のものを `await` していた場合だけが、この約束の対象
-/// である。
+/// 閉じることがある。`next` の外で別のものを `await` していた場合だけが、この
+/// 約束の対象である。
 /// 窓を閉じるのは、期限を過ぎてから始めたポーリングで読み込みが `Pending`
-/// を返したとき (`Connection::poll_socket`) だけである。期限のタイマーは
-/// タスクを起こすだけで、窓を閉じない。
+/// を返し、しかもその読み込みが協調スケジューリングの予算切れで止められたの
+/// ではないと分かったとき (`Connection::poll_socket`) だけである。予算切れの
+/// `Pending` は、読めるデータが残っていても返るので、空のソケットの証拠に
+/// ならない。期限のタイマーはタスクを起こすだけで、窓を閉じない。
 pub(crate) const REJECTION_WINDOW: Duration = Pacer::INTERVAL;
 
 /// 1 回の接続試行。`State::Dialing` に保存され、キャンセルの後も続きから
@@ -209,8 +211,8 @@ enum Step {
     WriteTimedOut,
     ExtendDue,
     Extended(Instant, Result<()>),
-    /// 拒否の窓の期限を過ぎてから読み込みが `Pending` を返した。
-    /// ソケットに未読のフレームがない。`poll_socket` だけが返す。
+    /// 拒否の窓の期限を過ぎてから、予算の残った読み込みが `Pending` を
+    /// 返した。ソケットに未読のフレームがない。`poll_socket` だけが返す。
     RejectionWindowClosed,
     /// 拒否の窓の期限に達した。タスクを起こすだけで状態は変えない。窓を
     /// 閉じるかどうかは、次のポーリングの `poll_socket` が決める。
@@ -229,7 +231,9 @@ impl Connection {
     ///
     /// 拒否の窓も同じように、読み込みが `Pending` を返した直後にここで閉じる。
     /// ソケットが空だと知るのは読み込みだけだからである。`window_elapsed` は、
-    /// このポーリングを始めた時点で窓の期限を過ぎていたことを表す。
+    /// このポーリングを始めた時点で窓の期限を過ぎていたことを表す。ただし、
+    /// 予算切れの `Pending` は空のソケットの証拠にならないので、読み込みの
+    /// 前後で予算が残っていたかを確かめる。
     fn poll_socket(
         &mut self,
         cx: &mut Context<'_>,
@@ -257,6 +261,12 @@ impl Connection {
                 Poll::Pending => {}
             }
         }
+        // tokio は 1 回のタスクのポーリングに使える作業量 (協調スケジューリングの
+        // 予算) を決めており、使い切ったタスクの読み込みには、読めるデータが
+        // 残っていても `Pending` を返す。予算切れの `Pending` を空のソケットと
+        // 取り違えないよう、読み込みの前後で予算が残っていたかを見る。両方で
+        // 残っていれば、`Pending` はソケットが空だという意味になる。
+        let budget_before = tokio::task::coop::has_budget_remaining();
         match self.stream.poll_next_unpin(cx) {
             Poll::Ready(Some(Ok(message))) => {
                 self.last_frame_at = Instant::now();
@@ -264,7 +274,11 @@ impl Connection {
             }
             Poll::Ready(Some(Err(e))) => Poll::Ready(Step::Failed(ws::error_kind(&e, limits))),
             Poll::Ready(None) => Poll::Ready(Step::Failed(TransportErrorKind::ClosedEarly)),
-            Poll::Pending if window_elapsed => Poll::Ready(Step::RejectionWindowClosed),
+            Poll::Pending
+                if window_elapsed && budget_before && tokio::task::coop::has_budget_remaining() =>
+            {
+                Poll::Ready(Step::RejectionWindowClosed)
+            }
             Poll::Pending => Poll::Pending,
         }
     }
