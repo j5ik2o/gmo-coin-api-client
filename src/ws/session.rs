@@ -20,6 +20,9 @@
 //! - コマンドは、同じポーリングの中で `Pacer::take` が通った直後にだけ書く。
 //!   ペーサの予約は持たないので、キャンセルで失われるものも、遅れて使われる
 //!   ものもない。
+//! - `sent.last` が残るのは、その書き込みから `REJECTION_WINDOW` を過ぎた後に、
+//!   ソケットに未読のフレームがないことを `next` がまだ観測していない間だけ
+//!   である。
 
 use std::collections::BTreeMap;
 use std::future::{Future, poll_fn};
@@ -44,11 +47,18 @@ use crate::transport::ws::{self, WsConnectError, WsStream};
 /// エラーに載せる操作名。ハンドシェイクのパス。トークンは決して含まない。
 pub(super) const OPERATION: &str = "/v1";
 
-/// 書き込みからこの時間を過ぎて届いた拒否は、どのコマンドのものともしない。
-/// 取引所は不正なコマンドにすぐ答え、コマンドはこの間隔でしか送らないので、
-/// これより古いコマンドへの返答はもう来ない。静かなチャネル (たとえば
-/// `orderEvents`) の subscribe はデータで裏付けられるまで長く待つので、
-/// 時間で区切らないと、後のサーバ発の拒否がその購読を落とす。
+/// 拒否の窓の長さ。書き込みからこの時間を過ぎた後に、ソケットに未読の
+/// フレームがないことを `next` が観測したら、窓を閉じる。それ以後に読む
+/// 拒否は、どのコマンドのものともしない。取引所は不正なコマンドにすぐ答え、
+/// コマンドはこの間隔でしか送らないので、これより古いコマンドへの返答は
+/// もう来ない。静かなチャネル (たとえば `orderEvents`) の subscribe は
+/// データで裏付けられるまで長く待つので、窓を閉じないと、後のサーバ発の
+/// 拒否がその購読を落とす。
+///
+/// 窓は、拒否が届いた時刻ではなく、フィードが観測できることで閉じる。
+/// フィードは `next` の中でしかソケットを読まないので、`next` が呼ばれて
+/// いない間に届いたフレームの到着時刻は分からない。未読のフレームが残って
+/// いる限り、その中の拒否は窓の中に届いたかもしれないので、窓を閉じない。
 pub(crate) const REJECTION_WINDOW: Duration = Pacer::INTERVAL;
 
 /// 1 回の接続試行。`State::Dialing` に保存され、キャンセルの後も続きから
@@ -100,10 +110,11 @@ enum State<C: FeedChannel> {
 /// 再接続で望ましい集合を再生する仕組みである。
 struct Sent<C: FeedChannel> {
     subscribed: BTreeMap<<C as Codec>::Key, C>,
-    /// 最後に書いたコマンドと書いた時刻のうち、まだ返答で裏付けられていない
-    /// もの。書き込みから `REJECTION_WINDOW` 以内に届いたサーバの拒否は
-    /// これに帰属する。新しいキーの subscribe はそのキーの最初のデータ
-    /// イベントで裏付けられる。拒否は 1 つのコマンドにしか帰属しない。
+    /// 最後に書いたコマンドと書いた時刻のうち、まだ返答で裏付けられておらず、
+    /// 拒否の窓 (`REJECTION_WINDOW`) が閉じていないもの。これがある間に
+    /// 読んだサーバの拒否は、これに帰属する。新しいキーの subscribe はその
+    /// キーの最初のデータイベントで裏付けられる。拒否は 1 つのコマンドに
+    /// しか帰属しない。
     last: Option<(Instant, Written<C>)>,
 }
 
@@ -132,20 +143,14 @@ impl<C: FeedChannel> Sent<C> {
         }
     }
 
-    /// `now` に届いた拒否を、`REJECTION_WINDOW` 以内に書いた最後のコマンドに
-    /// 帰属させ、拒否された subscribe を取り消す。`desired` からは、そのキーが
-    /// まだ同じチャネルを望んでいるときだけ外す。別のオプションで望み直した
-    /// subscribe はまだ送っていない別のコマンドだからである。窓を過ぎて
-    /// いれば `None` を返し、何も変えない。
-    fn rejected(
-        &mut self,
-        desired: &mut BTreeMap<<C as Codec>::Key, C>,
-        now: Instant,
-    ) -> Option<C> {
-        let (written_at, command) = self.last.take()?;
-        if now > written_at + REJECTION_WINDOW {
-            return None;
-        }
+    /// 読んだ拒否を、窓が開いている最後のコマンドに帰属させ、拒否された
+    /// subscribe を取り消す。`desired` からは、そのキーがまだ同じチャネルを
+    /// 望んでいるときだけ外す。別のオプションで望み直した subscribe はまだ
+    /// 送っていない別のコマンドだからである。そのようなコマンドがなければ
+    /// `None` を返し、何も変えない。読んだ時刻は見ない。窓を閉じるのは
+    /// `step` の `RejectionWindowClosed` だけである。
+    fn rejected(&mut self, desired: &mut BTreeMap<<C as Codec>::Key, C>) -> Option<C> {
+        let (_, command) = self.last.take()?;
         match command {
             Written::Subscribe { channel, .. } => {
                 let key = channel.key();
@@ -197,6 +202,8 @@ enum Step {
     WriteTimedOut,
     ExtendDue,
     Extended(Instant, Result<()>),
+    /// 拒否の窓の期限を過ぎ、ソケットに未読のフレームがない。
+    RejectionWindowClosed,
 }
 
 impl Connection {
@@ -489,11 +496,20 @@ impl<C: FeedChannel> Session<C> {
             .map(|since| since + timeouts.ws_write.get());
         let extend_at = auth.extend_due_at();
         let mut extend = auth.extend_in_flight();
+        let window_closes_at = sent
+            .last
+            .as_ref()
+            .map(|(written_at, _)| *written_at + REJECTION_WINDOW);
 
         // 腕の順序が契約である。延長 (結果と期限) とスロットはソケットより
-        // 先: 常に読めるソケットがそれらを飢えさせてはならない。アイドルは
-        // ソケットより後: フレームが待っているなら沈黙ではない。書き込みの
-        // 期限は `poll_socket` の中で検査し、ここの腕は起床のためだけにある。
+        // 先: 常に読めるソケットがそれらを飢えさせてはならない。拒否の窓と
+        // アイドルはソケットより後: フレームが待っているなら沈黙ではなく、
+        // 待っているフレームの中の拒否は窓の中に届いたかもしれない。窓の腕が
+        // 通るのは、同じポーリングでソケットが `Pending` を返した後だけなので、
+        // 「窓が過ぎた」と「過ぎた後にソケットが空だった」は同じ出来事である。
+        // 窓をソケットより先に置くと、遅れて戻った呼び出し側がすぐ届いていた
+        // 拒否を `None` で受け取る。書き込みの期限は `poll_socket` の中で
+        // 検査し、ここの腕は起床のためだけにある。
         let step = tokio::select! {
             biased;
             (sent_at, result) = poll_fn(|cx| match extend.as_mut() {
@@ -503,6 +519,7 @@ impl<C: FeedChannel> Session<C> {
             _ = sleep_until(extend_at.unwrap_or(now)), if extend_at.is_some() => Step::ExtendDue,
             _ = sleep_until(slot.unwrap_or(now)), if slot.is_some() && !want_write => Step::SlotReached,
             step = poll_fn(|cx| conn.poll_socket(cx, want_write, timeouts.ws_write.get(), &inner.config.limits)) => step,
+            _ = sleep_until(window_closes_at.unwrap_or(now)), if window_closes_at.is_some() => Step::RejectionWindowClosed,
             _ = sleep_until(write_deadline.unwrap_or(now)), if write_deadline.is_some() => Step::WriteTimedOut,
             _ = sleep_until(idle_at) => Step::Idle,
         };
@@ -518,7 +535,7 @@ impl<C: FeedChannel> Session<C> {
                     None => Some(Ok(event)),
                 },
                 Ok(Decoded::Rejected(text)) => {
-                    let channel = sent.rejected(desired, Instant::now());
+                    let channel = sent.rejected(desired);
                     Some(Ok(C::rejected(channel, text)))
                 }
                 Err(kind) => {
@@ -560,6 +577,10 @@ impl<C: FeedChannel> Session<C> {
                 None
             }
             Step::SlotReached => None,
+            Step::RejectionWindowClosed => {
+                sent.last = None;
+                None
+            }
             Step::Idle => Some(Ok(self.drop_connection(live_failure(
                 C::API,
                 TransportErrorKind::Timeout(Phase::WsIdle),
