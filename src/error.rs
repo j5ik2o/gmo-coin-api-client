@@ -198,7 +198,10 @@ impl ApiError {
         self.messages.iter().any(|m| m.code == code)
     }
 
-    /// 一部のエラーでは欠けている (`error_without_responsetime.json`)。
+    /// 取引所が付けた応答時刻。参考のための値であり、このクレートは処理に
+    /// 使わない。一部のエラーでは欠けている (`error_without_responsetime.json`)。
+    /// 取引所が書式を変えた場合も `None` になる。応答の分類はこの項目に
+    /// 依存しないので、書式の変更でエラーコードを失うことはない。
     pub fn response_time(&self) -> Option<Timestamp> {
         self.response_time
     }

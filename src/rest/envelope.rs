@@ -20,7 +20,11 @@ struct Wire<'a> {
     data: Option<&'a RawValue>,
     #[serde(borrow)]
     messages: Option<Vec<WireMessage<'a>>>,
-    responsetime: Option<Timestamp>,
+    /// 取引所が参考として付ける項目で、このクレートは処理に使わない。書式は
+    /// 取引所が決めるので、ここでは生のまま受け取り、[`ApiError`] を組み立てる
+    /// ときにだけ解析する。解析できなくても応答全体は失敗させない。
+    #[serde(borrow)]
+    responsetime: Option<&'a RawValue>,
 }
 
 /// `Cow` なのでエスケープされた文字列もデコードでき、可能なら借用する。
@@ -47,6 +51,10 @@ pub(crate) struct WireMessage<'a> {
 ///    `status == 0` でも HTTP 状態が 2xx の外なら `Protocol(HttpStatus)`。
 ///    成功の形をした本文を中継機が別の状態で返したとき、それを受付と
 ///    みなさない。
+///
+/// `responsetime` は検査しない。処理に使わない参考の項目であり、取引所が
+/// 書式を変えたときに応答全体 (成功なら `data`、エラーならエラーコード) を
+/// 失わせないためである。解析できたときだけ [`ApiError::response_time`] に残す。
 pub(crate) fn parse(
     api: ApiGroup,
     operation: &'static str,
@@ -81,7 +89,7 @@ pub(crate) fn parse(
             operation,
             status: wire.status,
             messages,
-            response_time: wire.responsetime,
+            response_time: wire.responsetime.and_then(response_time),
         }));
     }
     Ok(Answer {
@@ -89,6 +97,13 @@ pub(crate) fn parse(
         operation,
         data: wire.data.map(|raw| Zeroizing::new(raw.get().to_owned())),
     })
+}
+
+/// 参考のための `responsetime`。取引所の書式 (`2019-03-19T02:15:06.001Z`) を
+/// 解析できなければ `None`。欠けているときと同じ扱いにする。この項目を
+/// 処理に使わない呼び出し側にとって、両者の区別は意味を持たない。
+fn response_time(raw: &RawValue) -> Option<Timestamp> {
+    serde_json::from_str(raw.get()).ok()
 }
 
 /// コードが `ERR-<n>` でない、または文章が 512 バイトを超えるとき `None`。
@@ -170,6 +185,39 @@ mod tests {
         assert!(
             matches!(err, Error::Protocol(p) if matches!(p.kind(), ProtocolErrorKind::Shape { .. }))
         );
+    }
+
+    #[test]
+    fn a_changed_responsetime_format_fails_neither_data_nor_error_codes() {
+        // 成功の応答: data は保たれる。書式の違う responsetime は捨てるだけ。
+        let answer = classify(
+            200,
+            r#"{"status":0,"data":{"status":"OPEN"},"responsetime":"2026/10/27 11:49:18"}"#,
+        )
+        .expect("a changed responsetime must not make the body a non-envelope");
+        assert_eq!(answer.raw(), Some(r#"{"status":"OPEN"}"#));
+
+        // エラーの応答: エラーコードは保たれ、解析できない responsetime は None。
+        match classify(
+            200,
+            r#"{"status":1,"messages":[{"message_code":"ERR-5003","message_string":"Requests are too many."}],"responsetime":1750000000}"#,
+        ) {
+            Err(Error::Api(e)) => {
+                assert!(e.has(ErrorCode::RATE_LIMIT));
+                assert_eq!(e.messages()[0].text.as_ref(), "Requests are too many.");
+                assert_eq!(e.response_time(), None);
+            }
+            other => panic!("{other:?}"),
+        }
+
+        // 欠けているときと同じ扱い、そして 2xx の外の判定は変わらない。
+        assert!(matches!(
+            classify(
+                502,
+                r#"{"status":0,"data":"637000","responsetime":"not a time"}"#
+            ),
+            Err(Error::Protocol(p)) if *p.kind() == ProtocolErrorKind::HttpStatus(502)
+        ));
     }
 
     #[test]
