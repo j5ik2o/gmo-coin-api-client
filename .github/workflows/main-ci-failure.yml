@@ -18,8 +18,7 @@ on:
         type: string
 
 permissions:
-  issues: write
-  actions: read
+  contents: read
 
 env:
   LABEL: ci-failure-on-main
@@ -28,6 +27,9 @@ jobs:
   notify:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      issues: write
+      actions: read
     steps:
       - name: 元の実行を調べる
         id: run

@@ -6,20 +6,18 @@ on:
       - 'v[0-9]+.[0-9]+.[0-9]+-*'
 env:
   CARGO_TERM_COLOR: always
+permissions:
+  contents: read
 jobs:
   release:
     runs-on: ubuntu-latest
     environment: crates-io
-    permissions:
-      contents: read
-      id-token: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
-          token: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: stable
       - name: Check the tag against the crate version
@@ -33,11 +31,8 @@ jobs:
             echo "::error::The tag version ($TAG_VERSION) does not match the crate version in Cargo.toml ($CRATE_VERSION)."
             exit 1
           fi
-      - name: Authenticate with crates.io
-        id: auth
-        uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
       - name: release the crate
         env:
-          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           cargo publish -p gmo-coin-api-client

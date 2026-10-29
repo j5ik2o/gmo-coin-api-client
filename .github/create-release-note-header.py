@@ -12,11 +12,7 @@ previous_tag = args[3]
 next_tag = args[4]
 
 repo_url = f"{server_url}/{repo_name}"
-if previous_tag:
-    release_url = f"{repo_url}/compare/{previous_tag}...{next_tag}"
-else:
-    # 最初のリリースには比べる前のタグがないので、タグそのものへリンクする。
-    release_url = f"{repo_url}/releases/tag/{next_tag}"
+release_url = f"{repo_url}/compare/{previous_tag}...{next_tag}"
 
 next_version = next_tag.replace("v", "")
 

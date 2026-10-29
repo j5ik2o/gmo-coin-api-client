@@ -322,21 +322,5 @@ class BodyScriptTest(unittest.TestCase):
         )
 
 
-    def test_10b_header_without_a_previous_tag_links_to_the_tag(self):
-        header, _ = find_scripts()
-        p = subprocess.run(
-            [sys.executable, "-B", header, "https://github.com", "o/r", "", "v0.1.0"],
-            capture_output=True,
-        )
-        self.assertEqual(0, p.returncode, p.stderr.decode("utf-8"))
-        self.assertRegex(
-            p.stdout.decode("utf-8"),
-            re.compile(
-                r"^### \[0\.1\.0\]\(https://github\.com/o/r/releases/tag/v0\.1\.0\) \(\d{4}-\d{2}-\d{2}\)$",
-                re.MULTILINE,
-            ),
-        )
-
-
 if __name__ == "__main__":
     unittest.main()

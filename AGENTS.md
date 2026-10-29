@@ -75,6 +75,15 @@ cargo deny check advisories licenses
 
 `Cargo.toml` の `publish = false` は、加藤さんの公開承認があるまで外さない。この設定がある間は `lib-release` ワークフローの `cargo publish` は失敗する。
 
-公開は加藤さんが GitHub の Environment (`crates-io`) で承認する。`lib-bump-version` と `lib-release` のジョブにこの Environment を付けてあり、Environment に必須レビュアーを設定すると、承認が済むまでジョブは実行を始めない。
+リリースは次の順で進める。
 
-最初のリリースは `v*` タグがまだないため、`lib-bump-version` ワークフローに `version` を明示して実行する。`version` はそのときの `Cargo.toml` の版と同じ値にする。`Cargo.toml` の版が変わらないので、版を上げるコミットは作らず、タグだけを打つ。2 回目からは `level` の自動判定を使える。
+1. Actions の画面から `lib-bump-version` を実行する。このワークフローは版を上げる枝 (`chore/release-vX.Y.Z`) とコミット (`chore: release vX.Y.Z`) を作り、リリースノートを本文にした PR を開く。main への push も、タグの作成も、GitHub Release の作成もしない。
+2. PR をマージする。`GITHUB_TOKEN` で作った PR では CI が自動で走らないので、PR を閉じて開き直すか、空のコミットを足すなどして CI を走らせる。
+3. マージのあと、加藤さんが main に `vX.Y.Z` タグを push する。`lib-release` はそのタグの push で起動する。
+4. `lib-release` は Environment `crates-io` の承認を待ってから `cargo publish` を実行する。
+
+最初の 0.1.0 は版を上げる PR を作らない。加藤さんが今の main に `v0.1.0` を push する。`lib-bump-version` は `v*` タグがないときに、この手順を促すメッセージを出して止まる。
+
+公開は加藤さんが GitHub の Environment (`crates-io`) で承認する。`lib-release` のジョブにこの Environment を付けてあり、Environment に必須レビュアーを設定すると、承認が済むまでジョブは実行を始めない。
+
+公開に使う `CARGO_REGISTRY_TOKEN` は、リポジトリの secret ではなく Environment `crates-io` の secret に置く。登録は加藤さんが自分で行う。
