@@ -45,16 +45,25 @@ jobs:
           gh api "repos/$REPO/actions/runs/$RUN_ID" > run.json
           event=$(jq -r '.event' run.json)
           branch=$(jq -r '.head_branch' run.json)
+          workflow_path=$(jq -r '.path' run.json)
           conclusion=$(jq -r '.conclusion // ""' run.json)
           {
             echo "event=$event"
             echo "branch=$branch"
+            echo "workflow_path=$workflow_path"
             echo "conclusion=$conclusion"
             echo "url=$(jq -r '.html_url' run.json)"
             echo "sha=$(jq -r '.head_sha' run.json)"
             echo "run_number=$(jq -r '.run_number' run.json)"
             echo "run_attempt=$(jq -r '.run_attempt' run.json)"
           } >> "$GITHUB_OUTPUT"
+          # workflow_dispatch の run_id には、同じリポジトリの別のワークフローの実行も指定できる。
+          # CI 以外の実行を対象にしないよう、ワークフローのファイルで確かめる。
+          if [ "$workflow_path" != ".github/workflows/ci.yml" ]; then
+            echo "target=false" >> "$GITHUB_OUTPUT"
+            echo "CI 以外のワークフローの実行（workflow_path=$workflow_path）なので何もしない"
+            exit 0
+          fi
           if [ "$branch" = "main" ] && { [ "$event" = "push" ] || [ "$event" = "schedule" ]; }; then
             echo "target=true" >> "$GITHUB_OUTPUT"
           else
