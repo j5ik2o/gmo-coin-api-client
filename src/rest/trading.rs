@@ -606,7 +606,11 @@ impl Client<Authenticated> {
     ///   [`Error::accepted_but_unreadable`](crate::error::Error::accepted_but_unreadable)
     ///   なら発注は確定している。反映が遅れているだけなので、少し待って
     ///   照会し直す。
-    /// - 照会そのものが失敗したときは、そのエラーを返す。
+    /// - 照会そのものが失敗したときは、照会のエラーを捨て、照会が空だった
+    ///   ときと同じ規則で 1 回目か 2 回目のエラーを返す。照会のエラー
+    ///   (流量制限の ERR-5003 など) をそのまま返すと
+    ///   [`Error::outcome_unknown`](crate::error::Error::outcome_unknown) が偽になり、
+    ///   「注文が拒否された＝発注されていない」と読めてしまうため。
     ///
     /// # 例
     /// ```no_run
@@ -643,13 +647,17 @@ impl Client<Authenticated> {
         // 2 回目が ERR-915 以外の拒否でも、1 回目が適用されている可能性は
         // 残る。読み取りだけの照会で確かめる。
         let lookup = OrderLookup::ByClientOrderIds(Batch::one(order.client_order_id.clone()));
-        let found = self.orders(&lookup).await?;
-        match found.first() {
-            Some(order) => Ok(order.order_id),
-            // 2 回目が拒否されたなら、1 回目の結果不明を返す。2 回目の Api
-            // エラーを返すと「適用されていない」と読めてしまう。
-            None if !second.outcome_unknown() => Err(first),
-            None => Err(second),
+        let found = match self.orders(&lookup).await {
+            Ok(orders) => orders.first().map(|order| order.order_id),
+            // 照会のエラーをそのまま返すと、拒否 (Error::Api) なら
+            // 「注文が適用されていない」と読めてしまう。照会は読むだけなので、
+            // 注文の結果は 1 回目か 2 回目のエラーで決める。
+            Err(_) => None,
+        };
+        match found {
+            Some(id) => Ok(id),
+            None if second.outcome_unknown() => Err(second),
+            None => Err(first),
         }
     }
 
