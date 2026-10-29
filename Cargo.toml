@@ -17,7 +17,8 @@ categories = [
     "finance",
     "web-programming::websocket",
 ]
-# リポジトリ専用のファイルは crates.io のパッケージに載せない。
+# リポジトリ専用のファイルと、リポジトリの CI で回すテストは crates.io の
+# パッケージに載せない。テスト用の TLS 秘密鍵 (tests/fixtures/tls) も含めない。
 exclude = [
     "/.github",
     "/.gitignore",
@@ -27,6 +28,7 @@ exclude = [
     "/deny.toml",
     "/renovate.json",
     "/rust-toolchain.toml",
+    "/tests",
     "/tools",
 ]
 
