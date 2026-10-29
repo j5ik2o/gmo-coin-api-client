@@ -627,31 +627,6 @@ async fn a_dropped_connection_leaves_the_order_outcome_unknown_and_the_resend_ke
     mock.assert_done();
 }
 
-/// README の「注文を出す」の手順そのもの。結果不明なら同じ注文を再送し、
-/// ERR-915 なら顧客注文 ID で照会する。
-async fn place_or_recover(
-    client: &Client<Authenticated>,
-    order: &NewOrder,
-) -> Result<OrderId, Box<dyn std::error::Error>> {
-    match client.place_order(order).await {
-        Ok(id) => Ok(id),
-        Err(e) if e.outcome_unknown() => match client.place_order(order).await {
-            Ok(id) => Ok(id),
-            Err(Error::Api(api)) if api.has(ErrorCode::CLIENT_ORDER_ID_USED) => {
-                let lookup =
-                    OrderLookup::ByClientOrderIds(Batch::one(order.client_order_id.clone()));
-                let orders = client.orders(&lookup).await?;
-                Ok(orders
-                    .first()
-                    .ok_or("ERR-915 なのに注文が照会できない")?
-                    .order_id)
-            }
-            Err(e) => Err(e.into()),
-        },
-        Err(e) => Err(e.into()),
-    }
-}
-
 fn order_with_client_id(order_id: u64, client_order_id: &str) -> Reply {
     Reply::Json(
         json!({"status": 0, "data": {"list": [{
@@ -685,7 +660,8 @@ async fn the_readme_recipe_recovers_the_order_id_after_a_drop_and_err_915() {
         .reply(order_with_client_id(223456789, "abc123"));
     let client = authed(&mock);
 
-    let id = place_or_recover(&client, &limit_buy(Symbol::BTC))
+    let id = client
+        .place_order_or_recover(&limit_buy(Symbol::BTC))
         .await
         .expect("recovered");
 
@@ -710,7 +686,8 @@ async fn the_readme_recipe_reports_an_empty_lookup_as_an_error_not_a_panic() {
         .reply(Reply::Json(r#"{"status":0,"data":{}}"#.to_owned()));
     let client = authed(&mock);
 
-    let err = place_or_recover(&client, &limit_buy(Symbol::BTC))
+    let err = client
+        .place_order_or_recover(&limit_buy(Symbol::BTC))
         .await
         .expect_err("nothing to recover");
 
