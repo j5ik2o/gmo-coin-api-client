@@ -167,4 +167,7 @@ lint の水準は `Cargo.toml` の `[lints]` が決めています。警告を�
 
 ## ライセンス
 
-まだ決まっていません。`Cargo.toml` の `license` は暫定の値で、`LICENSE` ファイルは置いていません。
+MIT と Apache License 2.0 のどちらかを選んで使える二重ライセンスです。
+
+- [LICENSE-MIT](LICENSE-MIT)
+- [LICENSE-APACHE](LICENSE-APACHE)
