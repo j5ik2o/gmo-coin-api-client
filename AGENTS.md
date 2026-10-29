@@ -75,12 +75,13 @@ cargo deny check advisories licenses
 
 `Cargo.toml` の `publish = false` は、加藤さんの公開承認があるまで外さない。この設定がある間は `lib-release` ワークフローの `cargo publish` は失敗する。
 
-リリースは次の順で進める。
+リリースは次の順で進める。詳しい手順と、CI の起こし方を選んだ理由は [docs/release.md](docs/release.md) に書いてある。
 
-1. Actions の画面から `lib-bump-version` を実行する。このワークフローは版を上げる枝 (`chore/release-vX.Y.Z`) とコミット (`chore: release vX.Y.Z`) を作り、リリースノートを本文にした PR を開く。main への push も、タグの作成も、GitHub Release の作成もしない。
-2. PR をマージする。`GITHUB_TOKEN` で作った PR では CI が自動で走らないので、PR を閉じて開き直すか、空のコミットを足すなどして CI を走らせる。
-3. マージのあと、加藤さんが main に `vX.Y.Z` タグを push する。`lib-release` はそのタグの push で起動する。
-4. `lib-release` は Environment `crates-io` の承認を待ってから `cargo publish` を実行する。
+1. Actions の画面から `lib-bump-version` を実行する。このワークフローは版を上げる枝 (`chore/release-vX.Y.Z`) とコミット (`chore: release vX.Y.Z`) を作り、リリースノートを実行の Summary とアーティファクト `release-notes` に残す。main への push も、タグの作成も、GitHub Release の作成もしない。
+2. 人が PR を開く。`GITHUB_TOKEN` では PR を作れないので、PR はワークフローではなく人が開く。人が開いた PR では CI が実行される。リポジトリ設定「Allow GitHub Actions to create and approve pull requests」は有効にしない。
+3. 加藤さんの承認を得て PR をマージする。
+4. マージのあと、加藤さんが main に `vX.Y.Z` タグを push する。`lib-release` はそのタグの push で起動する。
+5. `lib-release` は Environment `crates-io` の承認を待ってから `cargo publish` を実行する。
 
 最初の 0.1.0 は版を上げる PR を作らない。加藤さんが今の main に `v0.1.0` を push する。`lib-bump-version` は `v*` タグがないときに、この手順を促すメッセージを出して止まる。
 
