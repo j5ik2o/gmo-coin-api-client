@@ -28,7 +28,7 @@ use crate::domain::{
     OrderStatus, OrderType, PositionId, Price, SettleType, Side, Size, Symbol, TimeInForce,
     Timestamp,
 };
-use crate::error::{ApiMessage, Error, ErrorCode, Postcondition, ProtocolErrorKind, Result};
+use crate::error::{ApiMessage, Postcondition, ProtocolErrorKind, Result};
 
 /// 取引所が報告する注文 (`GET /orders`、`GET /activeOrders`)。
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
@@ -540,8 +540,8 @@ impl Client<Authenticated> {
     ///   読めなかった `Protocol`): 同じ `NewOrder` (同じ `client_order_id`) を
     ///   再送する。発注されるのは高々一度で、最初の試行が発注されていれば
     ///   再送は ERR-915 で拒否される。`accepted_but_unreadable()` も真なら
-    ///   発注は確定しているので、再送せずに照会してよい。
-    ///   再送と照会をまとめて行う [`Client::place_order_or_recover`] もある。
+    ///   発注は確定しているので、再送せずに照会してよい。再送と照会を 1 つの
+    ///   手順にまとめた例は、README の「注文を出す」にある。
     ///
     /// # 例
     /// ```no_run
@@ -567,72 +567,6 @@ impl Client<Authenticated> {
         order.check()?;
         let call = Call::new(endpoint!(POST "/v1/order")).json(&order.wire());
         self.private(call).await?.data()
-    }
-
-    /// [`Client::place_order`] を送り、結果が分からないときは同じ注文をもう
-    /// 一度送り、それでも決まらなければ顧客注文 ID で照会して、発注された
-    /// 注文の ID を返す。取引所の操作を増やすものではない。
-    ///
-    /// この再送と照会の手順はここにだけある。README の「注文を出す」の例も
-    /// このメソッドを呼ぶ。
-    ///
-    /// # 事前条件
-    /// [`NewOrder`] が保証する ([`Client::place_order`] と同じ)。
-    ///
-    /// # 事後条件
-    /// `Ok(id)` は、`order.client_order_id` の注文が取引所に高々 1 回だけ
-    /// 発注され、その注文 ID が `id` であることを意味する。約定したことではない。
-    ///
-    /// # エラー
-    /// - 1 回目が成功したとき、または 1 回目が [`Error::outcome_unknown`] の
-    ///   偽で失敗したときは、[`Client::place_order`] のエラーをそのまま返す。
-    /// - 1 回目が結果不明で、2 回目が ERR-915
-    ///   ([`ErrorCode::CLIENT_ORDER_ID_USED`]) のときは、顧客注文 ID で注文を
-    ///   照会して `Ok` を返す。
-    /// - 2 回目が ERR-915 で、照会が空のときは、その ERR-915 を
-    ///   [`Error::Api`] として返す。取引所への反映が遅れているだけなので、
-    ///   少し待って `orders(OrderLookup::ByClientOrderIds(..))` で照会し直す。
-    /// - 照会が失敗したときは、そのエラーを返す。
-    ///
-    /// # 例
-    /// ```no_run
-    /// # async fn run(client: gmo_coin_api_client::Client<gmo_coin_api_client::Authenticated>) -> gmo_coin_api_client::Result<()> {
-    /// use gmo_coin_api_client::rest::{NewOrder, OrderExecution};
-    /// use gmo_coin_api_client::{ClientOrderId, LimitTimeInForce, OrderPrice, OrderSize, Side, Symbol};
-    /// let order = NewOrder {
-    ///     client_order_id: ClientOrderId::generate(),
-    ///     symbol: Symbol::BTC,
-    ///     side: Side::Buy,
-    ///     size: OrderSize::parse("0.001")?,
-    ///     execution: OrderExecution::Limit {
-    ///         price: OrderPrice::parse("9000000")?,
-    ///         time_in_force: LimitTimeInForce::Fas,
-    ///         losscut_price: None,
-    ///     },
-    /// };
-    /// let id = client.place_order_or_recover(&order).await?;
-    /// println!("{id}");
-    /// # Ok(()) }
-    /// ```
-    pub async fn place_order_or_recover(&self, order: &NewOrder) -> Result<OrderId> {
-        match self.place_order(order).await {
-            Ok(id) => Ok(id),
-            Err(first) if first.outcome_unknown() => match self.place_order(order).await {
-                Ok(id) => Ok(id),
-                Err(Error::Api(api)) if api.has(ErrorCode::CLIENT_ORDER_ID_USED) => {
-                    let lookup =
-                        OrderLookup::ByClientOrderIds(Batch::one(order.client_order_id.clone()));
-                    match self.orders(&lookup).await?.first() {
-                        Some(found) => Ok(found.order_id),
-                        // ERR-915 の直後でも照会が空になる。呼び出し側は少し待って
-                        // 照会し直せるよう、ERR-915 をそのまま返す。
-                        None => Err(Error::Api(api)),
-                    }
-                }
-                Err(e) => Err(e),
-            },
-            Err(e) => Err(e),
-        }
     }
 
     /// `POST /private/v1/changeOrder`。
