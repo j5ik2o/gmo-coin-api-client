@@ -8,6 +8,8 @@ all-features = true
 [advisories]
 # 対応していない助言が 1 件でもあれば失敗する。除外を足すときは、
 # なぜ当てはまらないかをコメントに書く。
+# 推移的な依存の unsound の勧告も落とす（既定は workspace だけを見る）。
+unsound = "all"
 
 [licenses]
 # いまの依存に現れる許諾的なライセンスだけを許す。GPL / AGPL / LGPL は
