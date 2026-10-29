@@ -1461,6 +1461,68 @@ async fn a_subscribe_rejected_while_abandoned_is_sent_again() {
     feed.close().await.unwrap();
 }
 
+/// あきらめている間に拒否された subscribe を、書き直しの前に呼び出し側が
+/// 取り下げても、unsubscribe は取引所に届く (PR #27 のレビュー指摘)。
+/// 送った集合から subscribe を消してしまうと、取引所で購読が生きている
+/// 可能性があるのにどちらの集合にも残らず、unsubscribe が書かれないまま
+/// 接続の間ずっと購読が残る。
+#[tokio::test]
+async fn an_unsubscribe_after_an_anonymous_rejection_still_reaches_the_exchange() {
+    const BACKLOG: usize = 100;
+    let mock = MockExchange::start().await;
+    let ws = mock.ws();
+    let mut feed = mock.client().public_feed();
+    feed.subscribe(PublicChannel::Ticker(Symbol::ETH)).unwrap();
+    {
+        let mut next = std::pin::pin!(feed.next());
+        tokio::select! {
+            event = &mut next => panic!("no event before the subscribe: {event:?}"),
+            _ = ws.subscribed(Api::Public, "ticker", Some("ETH"), WAIT) => {}
+        }
+    }
+    let ticker = fixture("ws_public_ticker.json");
+    for _ in 0..BACKLOG {
+        ws.push(Api::Public, &ticker);
+    }
+    tokio::time::sleep(Duration::from_millis(1300)).await;
+
+    feed.subscribe(PublicChannel::Ticker(Symbol::XRP)).unwrap();
+    let deadline = Instant::now() + WAIT;
+    while !ws.commands().iter().any(|(_, _, c)| {
+        c["command"] == "subscribe" && c["channel"] == "ticker" && c["symbol"] == "XRP"
+    }) {
+        assert!(
+            Instant::now() < deadline,
+            "the XRP subscribe was never written"
+        );
+        let _ = tokio::time::timeout(Duration::from_millis(20), feed.next()).await;
+    }
+
+    // 帰属をあきらめている間の拒否。書き直しは窓の期限の後なので、その前に取り下げる。
+    ws.push(Api::Public, &fixture("live/ws_public_error.json"));
+    match tokio::time::timeout(WAIT, feed.next())
+        .await
+        .expect("the rejection never arrived")
+        .unwrap()
+    {
+        PublicEvent::Rejected { channel, .. } => assert_eq!(channel, None),
+        other => panic!("{other:?}"),
+    }
+    assert!(feed.unsubscribe(&PublicChannel::Ticker(Symbol::XRP)));
+
+    let deadline = Instant::now() + WAIT;
+    while !ws.commands().iter().any(|(_, _, c)| {
+        c["command"] == "unsubscribe" && c["channel"] == "ticker" && c["symbol"] == "XRP"
+    }) {
+        assert!(
+            Instant::now() < deadline,
+            "the unsubscribe never reached the exchange"
+        );
+        let _ = tokio::time::timeout(Duration::from_millis(20), feed.next()).await;
+    }
+    feed.close().await.unwrap();
+}
+
 /// 同じチャネルが匿名の拒否で送り直され、また匿名で拒否されたら、そこで
 /// 止める (issue #23 のレビュー指摘)。チャネル自体が無効 (ERR-5106 など) だと、
 /// 送り直すたびに拒否され、1.05 秒ごとに同じ subscribe を送り続けて IP ごとの
