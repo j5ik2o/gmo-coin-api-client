@@ -193,7 +193,8 @@ pub enum PrivateEvent {
 pub struct Disconnect {
     /// 切断の理由。
     pub reason: DisconnectReason,
-    /// 次の接続試行までの待ち時間。
+    /// 次の接続試行までの待ち時間。バックオフの上限の半分以上、上限以下で、
+    /// 試行のたびに変わる (equal jitter)。
     pub retry_in: Duration,
 }
 

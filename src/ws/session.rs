@@ -47,7 +47,7 @@ use tokio_tungstenite::tungstenite::Message;
 use super::codec::{Codec, Decoded};
 use super::lease::{Auth, LeaseSchedule, TokenLease, TokenSource};
 use super::{Disconnect, DisconnectReason, FeedChannel, Pacer, PrivateChannel, PublicChannel};
-use crate::client::{Authenticated, Client, Inner, Limits};
+use crate::client::{Authenticated, Backoff, Client, Inner, Limits};
 use crate::error::{
     ApiGroup, ContractViolation, Delivery, Error, ErrorCode, Phase, ProtocolError,
     ProtocolErrorKind, Result, TransportError, TransportErrorKind,
@@ -443,8 +443,21 @@ fn extra_backoff_steps(reason: &DisconnectReason) -> u32 {
     }
 }
 
+/// セッションがこの失敗のあとに使う、バックオフの梯子の段数。`Backoff::cap`
+/// と `Backoff::delay` にはこの段数を渡す。
+fn backoff_step(attempt: u32, reason: &DisconnectReason) -> u32 {
+    attempt.saturating_add(extra_backoff_steps(reason))
+}
+
 fn sleep_until(at: Instant) -> tokio::time::Sleep {
     tokio::time::sleep_until(tokio::time::Instant::from_std(at))
+}
+
+/// 生きていた接続がバックオフの梯子を最初に戻すか。閾値は、乱数で引く
+/// `delay` ではなく、上限を決める [`Backoff::cap`] そのものである。乱数の
+/// 値が変わっても判定は変わらない。
+fn resets_ladder(backoff: &Backoff, connected_for: Duration) -> bool {
+    connected_for >= backoff.cap(u32::MAX)
 }
 
 impl<C: FeedChannel> Session<C> {
@@ -515,39 +528,43 @@ impl<C: FeedChannel> Session<C> {
                 if let Auth::Private { lease, .. } = &mut self.auth {
                     *lease = None;
                 }
-                Some(Ok(self.disconnected(DisconnectReason::HandshakeRejected {
-                    http_status,
-                })))
+                Some(Ok(self
+                    .disconnected(DisconnectReason::HandshakeRejected { http_status })
+                    .1))
             }
-            Err(DialFailure::Retry(reason)) => Some(Ok(self.disconnected(reason))),
+            Err(DialFailure::Retry(reason)) => Some(Ok(self.disconnected(reason).1)),
         }
     }
 
     /// `Waiting` に移り、`Disconnected` を作る。進行中の延長は捨てる。
-    fn disconnected(&mut self, reason: DisconnectReason) -> <C as Codec>::Event {
-        let step = self.attempt.saturating_add(extra_backoff_steps(&reason));
+    /// 返す段数は、この遷移で使ったバックオフの梯子の段数である。セッションが
+    /// 次に使う上限 (`Backoff::cap`) をテストが確かめられるようにするため、
+    /// 使った段数をそのまま返す。
+    fn disconnected(&mut self, reason: DisconnectReason) -> (u32, <C as Codec>::Event) {
+        let step = backoff_step(self.attempt, &reason);
         let delay = self.inner.config.reconnect.delay(step);
         self.attempt = self.attempt.saturating_add(1);
         self.state = State::Waiting {
             until: Instant::now() + delay,
         };
         self.auth.abandon_extend();
-        C::disconnected(Disconnect {
+        let event = C::disconnected(Disconnect {
             reason,
             retry_in: delay,
-        })
+        });
+        (step, event)
     }
 
     /// 生きていた接続を捨てる。バックオフの最上段 (`Backoff` の `max`。
-    /// `delay` は 16 段で飽和するので、`initial` が `max / 65536` より
+    /// `cap` は 16 段で飽和するので、`initial` が `max / 65536` より
     /// 小さい設定でだけ `max` を下回る) の間維持されていたら試行回数を戻す。
     fn drop_connection(&mut self, reason: DisconnectReason) -> <C as Codec>::Event {
         if let State::Connected(conn, _) = &self.state
-            && conn.connected_at.elapsed() >= self.inner.config.reconnect.delay(u32::MAX)
+            && resets_ladder(&self.inner.config.reconnect, conn.connected_at.elapsed())
         {
             self.attempt = 0;
         }
-        self.disconnected(reason)
+        self.disconnected(reason).1
     }
 
     /// `Connected` での 1 歩。`None` なら何も返すものがなく、ループを続ける。
@@ -1011,6 +1028,94 @@ mod tests {
             ),
             DialFailure::Retry(DisconnectReason::HandshakeRejected { http_status: 404 })
         ));
+    }
+
+    /// 梯子を戻す判定は、乱数で引いた待ち時間ではなく `cap` を閾値にする。
+    /// 乱数がいちばん小さい値 (`cap/2`) を返しても、失敗して `cap` を返しても、
+    /// 境界は同じである。待ち時間そのものを閾値にしていたら、引いた値によって
+    /// 境界が動き、このテストは落ちる。
+    #[test]
+    fn the_ladder_reset_threshold_does_not_depend_on_the_random_draw() {
+        use crate::client::Timeout;
+
+        let secs = |n| Timeout::new(Duration::from_secs(n)).unwrap();
+        let backoff = Backoff::new(secs(1), secs(60)).unwrap();
+        let threshold = backoff.cap(u32::MAX);
+        assert_eq!(threshold, Duration::from_secs(60));
+        let just_below = threshold.checked_sub(Duration::from_millis(1)).unwrap();
+
+        for (label, drawn) in [
+            ("smallest", backoff.delay_with(u32::MAX, |_| Some(0))),
+            ("failed", backoff.delay_with(u32::MAX, |_| None)),
+        ] {
+            assert!(
+                !resets_ladder(&backoff, just_below),
+                "{label}: the reset threshold moved below cap (drawn {drawn:?})"
+            );
+            assert!(
+                resets_ladder(&backoff, threshold),
+                "{label}: a connection kept for cap must reset the ladder"
+            );
+        }
+    }
+
+    /// ERR-5003 (`POST ws-auth` の呼び出し上限) の失敗。
+    fn rate_limited_reason() -> DisconnectReason {
+        use crate::error::{ApiError, ApiMessage};
+
+        DisconnectReason::Api(ApiError {
+            operation: "POST /v1/ws-auth",
+            status: 1,
+            messages: vec![ApiMessage {
+                code: ErrorCode::RATE_LIMIT,
+                text: "Requests are too many.".into(),
+            }],
+            response_time: None,
+        })
+    }
+
+    /// 既定の設定では、ERR-5003 のあとに引く待ち時間は、乱数がいちばん小さい
+    /// 値を返しても 1 秒の購読コマンドの枠より長い。full jitter (下限 0) に
+    /// 変えると、ここが 0 秒近くまで縮んで落ちる。
+    #[test]
+    fn a_rate_limit_waits_past_the_one_second_window_even_with_the_smallest_draw() {
+        let step = backoff_step(0, &rate_limited_reason());
+        assert_eq!(step, 2, "ERR-5003 starts two rungs down the ladder");
+        let backoff = crate::client::Config::default().reconnect;
+        let smallest = backoff.delay_with(step, |_| Some(0));
+        assert!(
+            smallest > Duration::from_secs(1),
+            "the smallest wait after ERR-5003 is {smallest:?}"
+        );
+    }
+
+    /// ERR-5003 の失敗をセッションに実際に渡し、`disconnected` の処理を通した
+    /// あと、その遷移が使った梯子の段数の cap がちょうど 80 ms であることを
+    /// 確かめる。2 段目が `max` に飽和しない設定 (20 ms..320 ms) では、1 段なら
+    /// 40 ms、2 段なら 80 ms、3 段なら 160 ms になる。乱数を引かずに段数の cap
+    /// を比べるので、1 段・3 段のどちらの誤りも乱数に関係なく毎回見つかる。
+    #[test]
+    fn a_rate_limit_moves_the_session_two_rungs_down_to_an_eighty_millisecond_cap() {
+        use crate::client::{Anonymous, Config, Timeout};
+        use crate::endpoint::Endpoints;
+        use crate::transport::Connector;
+
+        let ms = |n| Timeout::new(Duration::from_millis(n)).unwrap();
+        let config = Config {
+            reconnect: Backoff::new(ms(20), ms(320)).unwrap(),
+            ..Config::default()
+        };
+        let client =
+            Client::<Anonymous>::with_connector(Endpoints::production(), config, Connector::new());
+        let mut session = Session::<PublicChannel>::public(Arc::clone(&client.inner));
+
+        let (step, _event) = session.disconnected(rate_limited_reason());
+        assert_eq!(step, 2, "ERR-5003 starts two rungs down the ladder");
+        assert_eq!(
+            session.inner.config.reconnect.cap(step),
+            Duration::from_millis(80),
+            "the cap of the rung the session will use next"
+        );
     }
 
     /// 本番の Public WebSocket に不正な subscribe を 1 つ送り、生の返答を
