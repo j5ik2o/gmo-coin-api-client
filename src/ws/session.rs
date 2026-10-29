@@ -47,7 +47,7 @@ use tokio_tungstenite::tungstenite::Message;
 use super::codec::{Codec, Decoded};
 use super::lease::{Auth, LeaseSchedule, TokenLease, TokenSource};
 use super::{Disconnect, DisconnectReason, FeedChannel, Pacer, PrivateChannel, PublicChannel};
-use crate::client::{Authenticated, Client, Inner, Limits};
+use crate::client::{Authenticated, Backoff, Client, Inner, Limits};
 use crate::error::{
     ApiGroup, ContractViolation, Delivery, Error, ErrorCode, Phase, ProtocolError,
     ProtocolErrorKind, Result, TransportError, TransportErrorKind,
@@ -447,6 +447,13 @@ fn sleep_until(at: Instant) -> tokio::time::Sleep {
     tokio::time::sleep_until(tokio::time::Instant::from_std(at))
 }
 
+/// 生きていた接続がバックオフの梯子を最初に戻すか。閾値は、乱数で引く
+/// `delay` ではなく、上限を決める [`Backoff::cap`] そのものである。乱数の
+/// 値が変わっても判定は変わらない。
+fn resets_ladder(backoff: &Backoff, connected_for: Duration) -> bool {
+    connected_for >= backoff.cap(u32::MAX)
+}
+
 impl<C: FeedChannel> Session<C> {
     pub(crate) fn desire(&mut self, channel: C) -> core::result::Result<(), ContractViolation> {
         let max = self.inner.config.limits.max_subscriptions;
@@ -541,11 +548,9 @@ impl<C: FeedChannel> Session<C> {
     /// 生きていた接続を捨てる。バックオフの最上段 (`Backoff` の `max`。
     /// `cap` は 16 段で飽和するので、`initial` が `max / 65536` より
     /// 小さい設定でだけ `max` を下回る) の間維持されていたら試行回数を戻す。
-    /// ばらつきのある `delay` ではなく `cap` と比べる。比べるたびに閾値が
-    /// 変わると、リセットの判断が乱数に左右される。
     fn drop_connection(&mut self, reason: DisconnectReason) -> <C as Codec>::Event {
         if let State::Connected(conn, _) = &self.state
-            && conn.connected_at.elapsed() >= self.inner.config.reconnect.cap(u32::MAX)
+            && resets_ladder(&self.inner.config.reconnect, conn.connected_at.elapsed())
         {
             self.attempt = 0;
         }
@@ -1013,6 +1018,61 @@ mod tests {
             ),
             DialFailure::Retry(DisconnectReason::HandshakeRejected { http_status: 404 })
         ));
+    }
+
+    /// 梯子を戻す判定は、乱数で引いた待ち時間ではなく `cap` を閾値にする。
+    /// 乱数がいちばん小さい値 (`cap/2`) を返しても、失敗して `cap` を返しても、
+    /// 境界は同じである。待ち時間そのものを閾値にしていたら、引いた値によって
+    /// 境界が動き、このテストは落ちる。
+    #[test]
+    fn the_ladder_reset_threshold_does_not_depend_on_the_random_draw() {
+        use crate::client::Timeout;
+
+        let secs = |n| Timeout::new(Duration::from_secs(n)).unwrap();
+        let backoff = Backoff::new(secs(1), secs(60)).unwrap();
+        let threshold = backoff.cap(u32::MAX);
+        assert_eq!(threshold, Duration::from_secs(60));
+        let just_below = threshold.checked_sub(Duration::from_millis(1)).unwrap();
+
+        for (label, drawn) in [
+            ("smallest", backoff.delay_with(u32::MAX, |_| Some(0))),
+            ("failed", backoff.delay_with(u32::MAX, |_| None)),
+        ] {
+            assert!(
+                !resets_ladder(&backoff, just_below),
+                "{label}: the reset threshold moved below cap (drawn {drawn:?})"
+            );
+            assert!(
+                resets_ladder(&backoff, threshold),
+                "{label}: a connection kept for cap must reset the ladder"
+            );
+        }
+    }
+
+    /// 既定の設定では、ERR-5003 のあとに引く待ち時間は、乱数がいちばん小さい
+    /// 値を返しても 1 秒の購読コマンドの枠より長い。full jitter (下限 0) に
+    /// 変えると、ここが 0 秒近くまで縮んで落ちる。
+    #[test]
+    fn a_rate_limit_waits_past_the_one_second_window_even_with_the_smallest_draw() {
+        use crate::error::{ApiError, ApiMessage};
+
+        let rate_limited = DisconnectReason::Api(ApiError {
+            operation: "POST /v1/ws-auth",
+            status: 1,
+            messages: vec![ApiMessage {
+                code: ErrorCode::RATE_LIMIT,
+                text: "Requests are too many.".into(),
+            }],
+            response_time: None,
+        });
+        let step = extra_backoff_steps(&rate_limited);
+        assert_eq!(step, 2, "ERR-5003 starts two rungs down the ladder");
+        let backoff = crate::client::Config::default().reconnect;
+        let smallest = backoff.delay_with(step, |_| Some(0));
+        assert!(
+            smallest > Duration::from_secs(1),
+            "the smallest wait after ERR-5003 is {smallest:?}"
+        );
     }
 
     /// 本番の Public WebSocket に不正な subscribe を 1 つ送り、生の返答を

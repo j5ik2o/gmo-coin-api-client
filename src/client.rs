@@ -354,13 +354,32 @@ impl Backoff {
     /// equal jitter で、`cap/2` 以上 `cap` 以下の一様乱数である。同じ設定でも
     /// 呼ぶたびに値が変わる。
     pub(crate) fn delay(&self, attempt: u32) -> Duration {
+        self.delay_with(attempt, random_below)
+    }
+
+    /// 乱数源を差し替えられる [`Backoff::delay`]。`draw` は `[0, bound)` の値を
+    /// 返す関数で、`None` は乱数源が失敗したことを表す。失敗と最小値を
+    /// 差し込むためのテスト用の口であり、クレートの外には出ない。
+    ///
+    /// # 事後条件
+    /// 返り値は `cap(attempt)/2` 以上 `cap(attempt)` 以下。`draw` が `None` を
+    /// 返したときは `cap(attempt)` ちょうどになる。
+    pub(crate) fn delay_with(
+        &self,
+        attempt: u32,
+        draw: impl FnOnce(u64) -> Option<u64>,
+    ) -> Duration {
         let cap = self.cap(attempt);
         let cap_nanos = u64::try_from(cap.as_nanos()).unwrap_or(u64::MAX);
         let half = cap_nanos / 2;
-        // 乱数源が失敗したときは上限側に倒す。待ち時間の上限という不変条件は
-        // 乱数源の成否に依存しない。
-        let extra = random_below(half).unwrap_or(half);
-        Duration::from_nanos(half.saturating_add(extra))
+        let delay_nanos = match draw(half) {
+            // 乱数源が失敗したときは上限そのものに倒す。待ち時間の上限という
+            // 不変条件は乱数源の成否に依存しない。
+            None => cap_nanos,
+            // 差し込み口の契約を破る値が来ても、上限は超えない。
+            Some(extra) => half.saturating_add(extra.min(half)),
+        };
+        Duration::from_nanos(delay_nanos)
     }
 }
 
@@ -398,17 +417,18 @@ mod tests {
         assert_eq!(c.reconnect.cap(40), Duration::from_secs(60));
     }
 
-    /// ばらつきは呼ぶたびに変わり、梯子の上限を超えない。下限は上限の半分である。
+    /// ばらつきは呼ぶたびに変わり、どの段でも梯子の上限の半分以上、上限以下
+    /// に収まる。段ごとに 1000 回引く。
     #[test]
-    fn the_reconnect_delay_is_jittered_within_half_the_cap() {
+    fn every_reconnect_delay_is_jittered_within_half_the_cap() {
         use std::collections::BTreeSet;
 
         let secs = |n| Timeout::new(Duration::from_secs(n)).unwrap();
         let backoff = Backoff::new(secs(1), secs(60)).unwrap();
-        for attempt in [0u32, 1, 3, 10, u32::MAX] {
+        for attempt in [0u32, 1, 2, 3, 4, 10, 16, u32::MAX] {
             let cap = backoff.cap(attempt);
             let mut seen = BTreeSet::new();
-            for _ in 0..16 {
+            for _ in 0..1000 {
                 let delay = backoff.delay(attempt);
                 assert!(
                     cap / 2 <= delay && delay <= cap,
@@ -422,6 +442,43 @@ mod tests {
                 "attempt {attempt}: every delay was identical, so there is no jitter"
             );
         }
+    }
+
+    /// 梯子は `max` で止まり、待ち時間が `max` を超えることはない。
+    #[test]
+    fn the_ladder_stops_at_max_and_no_delay_exceeds_it() {
+        let secs = |n| Timeout::new(Duration::from_secs(n)).unwrap();
+        let backoff = Backoff::new(secs(1), secs(60)).unwrap();
+        for attempt in 0..=40u32 {
+            let expected = Duration::from_secs((1u64 << attempt.min(16)).min(60));
+            assert_eq!(backoff.cap(attempt), expected, "attempt {attempt}");
+            for _ in 0..16 {
+                assert!(backoff.delay(attempt) <= Duration::from_secs(60));
+            }
+        }
+        assert_eq!(backoff.cap(u32::MAX), Duration::from_secs(60));
+    }
+
+    /// 乱数源が失敗したときは、待ち時間は上限そのものになる。
+    #[test]
+    fn a_failing_random_source_falls_back_to_the_cap() {
+        let secs = |n| Timeout::new(Duration::from_secs(n)).unwrap();
+        let backoff = Backoff::new(secs(1), secs(60)).unwrap();
+        for attempt in [0u32, 1, 3, 10, u32::MAX] {
+            assert_eq!(
+                backoff.delay_with(attempt, |_| None),
+                backoff.cap(attempt),
+                "attempt {attempt}"
+            );
+        }
+        // 奇数ナノ秒の上限でも、失敗時の待ち時間は上限ちょうどになる
+        // (半分と半分を足すだけでは 1 ナノ秒足りない設定)。
+        let odd = Timeout::new(Duration::from_nanos(1_000_000_001)).unwrap();
+        let odd_backoff = Backoff::new(odd, odd).unwrap();
+        assert_eq!(
+            odd_backoff.delay_with(0, |_| None),
+            Duration::from_nanos(1_000_000_001)
+        );
     }
 
     #[test]
