@@ -5,6 +5,7 @@ edition = "2024"
 rust-version = "1.99.1"
 description = "GMOコインの暗号資産取引API (Public/Private REST と WebSocket) を呼び出す非同期クライアント"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/j5ik2o/gmo-coin-api-client"
 publish = false
 
 [dependencies]
