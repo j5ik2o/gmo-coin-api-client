@@ -45,25 +45,16 @@ jobs:
           gh api "repos/$REPO/actions/runs/$RUN_ID" > run.json
           event=$(jq -r '.event' run.json)
           branch=$(jq -r '.head_branch' run.json)
-          workflow_path=$(jq -r '.path' run.json)
           conclusion=$(jq -r '.conclusion // ""' run.json)
           {
             echo "event=$event"
             echo "branch=$branch"
-            echo "workflow_path=$workflow_path"
             echo "conclusion=$conclusion"
             echo "url=$(jq -r '.html_url' run.json)"
             echo "sha=$(jq -r '.head_sha' run.json)"
             echo "run_number=$(jq -r '.run_number' run.json)"
             echo "run_attempt=$(jq -r '.run_attempt' run.json)"
           } >> "$GITHUB_OUTPUT"
-          # workflow_dispatch の run_id には、同じリポジトリの別のワークフローの実行も指定できる。
-          # CI 以外の実行を対象にしないよう、ワークフローのファイルで確かめる。
-          if [ "$workflow_path" != ".github/workflows/ci.yml" ]; then
-            echo "target=false" >> "$GITHUB_OUTPUT"
-            echo "CI 以外のワークフローの実行（workflow_path=$workflow_path）なので何もしない"
-            exit 0
-          fi
           if [ "$branch" = "main" ] && { [ "$event" = "push" ] || [ "$event" = "schedule" ]; }; then
             echo "target=true" >> "$GITHUB_OUTPUT"
           else
@@ -131,18 +122,11 @@ jobs:
             --limit 100 --json number --jq '.[].number')
           for number in $numbers; do
             # CI の実行は重なりうるので、記録した最後の失敗より新しい成功（流し直しを含む）でだけ閉じる。
-            # 公開リポジトリでは第三者がコメントできるので、順序の根拠にする ci-run-key は、
-            # このワークフローが投稿した本文とコメントだけから読む。投稿者はログイン名だけでなく
-            # user.type が Bot であることも確かめる（本文の印だけでは判断しない）。
-            last_failure=$(
-              {
-                gh api "repos/$REPO/issues/$number" \
-                  --jq 'select(.user.login == "github-actions[bot]" and .user.type == "Bot") | .body'
-                gh api --paginate "repos/$REPO/issues/$number/comments" \
-                  --jq '.[] | select(.user.login == "github-actions[bot]" and .user.type == "Bot") | .body'
-              } | { grep -o 'ci-run-key: [0-9]*' || true; } | awk '{print $2}' | sort -n | tail -1
-            )
-            last_failure=${last_failure:-0}
+            # ci-run-key は第三者が同じ印を書けるので、github-actions[bot]（user.type が Bot）が
+            # 書いた本文とコメントだけから読む。判定は .github/failure-run-key.py とそのテストにある。
+            gh api "repos/$REPO/issues/$number" > issue.json
+            gh api --paginate --slurp "repos/$REPO/issues/$number/comments" > comments.json
+            last_failure=$(python3 "${GITHUB_WORKSPACE}"/.github/failure-run-key.py issue.json comments.json)
             if [ "$key" -gt "$last_failure" ]; then
               gh issue close "$number" --repo "$REPO" \
                 --comment "main の CI が成功した: $RUN_URL"
