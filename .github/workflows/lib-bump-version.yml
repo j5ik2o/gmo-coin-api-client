@@ -131,7 +131,8 @@ jobs:
           git push origin "$BRANCH"
       # 版上げの PR は人が開く。いまは設定「Allow GitHub Actions to create and
       # approve pull requests」が無効なので、このワークフローからは PR を作れない。
-      # GITHUB_TOKEN で PR を開いた場合も、CI は承認待ちで作られ、人の承認が要る。
+      # GITHUB_TOKEN で PR を開いた場合も、CI は承認待ちで作られる。
+      # 書き込み権限を持つ人が承認を押すまで、実行は始まらない。
       # 人が開いた PR なら pull_request の opened で CI がそのまま実行される。
       # 詳しくは docs/release.md を参照する。
       - name: Write the release notes and the next step

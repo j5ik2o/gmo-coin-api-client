@@ -10,7 +10,7 @@
 
 ### なぜこの方法にしたか
 
-CI の起こし方を決めるには、まず「版上げの PR を誰が開くか」を決める必要があります。GitHub は、リポジトリの `GITHUB_TOKEN` が起こしたイベントでは新しいワークフローを起動しません。`workflow_dispatch` と `repository_dispatch` は例外です。また、`pull_request` の `opened`・`synchronize`・`reopened` では、実行が承認待ちの状態で作られ、書き込み権限を持つ人が承認すると始まります（[Triggering a workflow](https://docs.github.com/en/actions/how-tos/writing-workflows/choosing-when-your-workflow-runs/triggering-a-workflow)）。つまり、`GITHUB_TOKEN` で PR を開いた場合は、CI を始めるのに人の承認が要ります。どの方法を選ぶにしても、PR を開く人を変えるか、人が承認や別の操作で CI を起こすかのどちらかになります。
+CI を起こす方法は、版上げの PR を誰が開くかで変わります。まずそれを決めます。GitHub は、リポジトリの `GITHUB_TOKEN` が起こしたイベントでは新しいワークフローを起動しません。`workflow_dispatch` と `repository_dispatch` は例外です。また、`pull_request` の `opened`・`synchronize`・`reopened` では、実行が承認待ちの状態で作られ、書き込み権限を持つ人が承認すると始まります（[Triggering a workflow](https://docs.github.com/en/actions/how-tos/writing-workflows/choosing-when-your-workflow-runs/triggering-a-workflow)）。つまり、`GITHUB_TOKEN` で PR を開いた場合は、書き込み権限を持つ人が承認を押すまで CI は始まりません。どの方法を選ぶにしても、PR を開く人を変えるか、人が承認や別の操作で CI を起こすかのどちらかになります。
 
 もう 1 つ制約があります。いまリポジトリ設定「Allow GitHub Actions to create and approve pull requests」は無効です。この設定が無効の間は、`GITHUB_TOKEN` は PR を作れません。`lib-bump-version` が `gh pr create` を呼んでも失敗します。そのため、Actions に PR を作らせて人が承認する方法、`workflow_dispatch` で CI を起こす方法、空のコミットを追加する方法は、どれもこの設定の有効化が前提になります。
 
@@ -27,7 +27,7 @@ CI の起こし方を決めるには、まず「版上げの PR を誰が開く�
 | 人が空のコミットを追加する | 上の設定を有効にする（PR を作るため） | なし | 空のコミットを追加する | 不採用 |
 
 - GitHub App のトークンを使う方法では、PR を開くのは App になり、CI も自動で実行されます。いまの方法と比べると、秘密鍵の保管と App の管理が増えます。自動化を優先するときに移します。
-- Actions に PR を作らせる方法、`workflow_dispatch`、空のコミットは、どれも上の設定の有効化が前提です。設定を有効にすると、Actions は PR の承認もできるようになります。そのため、この方法を採る場合は、main の保護ルールで「Actions 以外の承認を 1 件必須」にします。この文書を書いた時点で main には保護ルールも ruleset もないので、設定と保護ルールを同時に用意する必要があります。今回はどちらもしていません。
+- Actions に PR を作らせる方法、`workflow_dispatch`、空のコミットは、どれも上の設定を有効にしないと使えません。設定を有効にすると、Actions は PR の承認もできるようになります。そのため、この方法を採る場合は、main の保護ルールで「Actions 以外の承認を 1 件必須」にします。この文書を書いた時点で main には保護ルールも ruleset もないので、設定と保護ルールは同じときに用意します。保護ルールがないまま設定を有効にすると、Actions が自分の開いた PR を承認でき、人の承認を待たずにマージへ進めます。今回はどちらもしていません。
 
 ## 手順
 
@@ -74,7 +74,7 @@ CI が実行されなかったときは、PR を閉じて開き直します。�
 
 ## 「Allow GitHub Actions to create and approve pull requests」の扱い
 
-この手順では、この設定を有効にしません。無効のままでよいので、加藤さんの承認を待って有効にする必要はありません。
+この手順では、この設定を有効にしません。無効のままで手順が成り立つので、加藤さんに有効化を頼む場面はありません。
 
 有効にする方法を採る場合は、この文書の「比べた方法」に書いたとおり、main の保護ルールで「Actions 以外の承認を 1 件必須」にします。設定だけを有効にして、Actions が自分の開いた PR を承認できる状態にはしません。
 
