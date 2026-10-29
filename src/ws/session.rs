@@ -30,10 +30,11 @@
 //!   状態が続く (issue #23)。読んだ拒否はどのコマンドにも結び付けない
 //!   (`Rejected { channel: None }`)。拒否されたのが最後に書いた subscribe で、
 //!   そのチャネルがまだ望まれているなら、書き直しの対象にして差分に書かせる。
-//!   書き直しはチャネルごとに 1 回までで、それも匿名の拒否で返ってきたら望みも
-//!   外す (無効なチャネルを送り続けない)。送った集合は残すので、購読が取引所で
-//!   生きている可能性があるときは unsubscribe を書ける。あきらめている間に
-//!   書いたコマンドも `last` に残す。
+//!   書き直しはチャネルごとに 1 回までで、それも匿名の拒否で返ってきたら自動の
+//!   書き直しだけをやめる (無効なチャネルを送り続けない)。望ましい集合も
+//!   送った集合も変えないので、差分は unsubscribe も書かない。望みは残るので、
+//!   再接続はそのチャネルを送り直す。あきらめている間に書いたコマンドも
+//!   `last` に残す。
 //! - `sent.last` が残るのは、その書き込みから `REJECTION_WINDOW` を過ぎた後に、
 //!   ソケットに未読のフレームがないことを `next` がまだ観測していない間だけ
 //!   である。期限を過ぎれば、コマンドが待っていても窓ごとに一度は読むので、
@@ -184,8 +185,9 @@ struct Sent<C: FeedChannel> {
     /// 匿名の拒否による書き直しを使ったキー。書き直しはチャネルごとに 1 回まで
     /// である。チャネル自体が無効 (ERR-5106 など) だと送り直すたびに拒否され、
     /// 1.05 秒ごとに同じ subscribe を送り続けて、IP ごとのコマンド枠を使い切る。
-    /// 2 度目の匿名の拒否では望みを外し、自動の書き直しをやめる (購読の状態は
-    /// 残すので、差分は unsubscribe を書ける)。印は帰属が戻ったとき
+    /// 2 度目の匿名の拒否では自動の書き直しだけをやめる。望ましい集合も送った
+    /// 集合も変えないので、差分は unsubscribe も書かない。望みは残るので、
+    /// 再接続はそのチャネルを送り直す。印は帰属が戻ったとき
     /// (`Step::RejectionWindowClosed`) と、呼び出し側が `subscribe` を呼び直した
     /// とき (`Session::desire`) に消す。新しい接続では `empty` で空から始まる。
     retried: BTreeSet<<C as Codec>::Key>,
@@ -252,10 +254,10 @@ impl<C: FeedChannel> Sent<C> {
     /// 望んでいるなら、送った集合は残したまま書き直しの対象にし、差分に 1 度
     /// だけ書き直させる。拒否がその subscribe のものなら購読が黙って欠けず、
     /// 別のコマンドの拒否だった場合も、重複した subscribe は取引所で置き換えに
-    /// なるだけである。同じチャネルが 2 度目の匿名の拒否で返ってきたら、望みも
-    /// 外して自動の書き直しをやめる (`retried`)。送った集合に残すのは、購読が
-    /// 取引所で生きている可能性があるときに unsubscribe を書くためである。
-    /// 望み直していないチャネルも、同じ理由でそのまま残す。
+    /// なるだけである。同じチャネルが 2 度目の匿名の拒否で返ってきたら、自動の
+    /// 書き直しだけをやめる (`retried`)。望ましい集合も送った集合も変えない
+    /// ので、差分は unsubscribe も書かない。望み直していないチャネルは、
+    /// 送るべき unsubscribe を失わないよう、そのまま残す。
     fn rejected(&mut self, desired: &mut BTreeMap<<C as Codec>::Key, C>) -> Option<C> {
         if self.attribution_abandoned {
             self.reject_anonymously(desired);
@@ -280,10 +282,12 @@ impl<C: FeedChannel> Sent<C> {
     /// 帰属をあきらめている間に読んだ、どのコマンドのものか決められない拒否。
     /// 最後に書いた subscribe がまだ望まれていれば、書き直しの対象にして差分に
     /// 1 度だけ書かせる。送った集合からは外さない (取引所で購読が生きている
-    /// 可能性があるため)。2 度目の匿名の拒否では望みも外し、自動の書き直しを
-    /// やめる。チャネル自体が無効なら 1.05 秒ごとに同じコマンドを送り続け、
-    /// IP ごとのコマンド枠を使い切るからである。印は帰属が戻るか、呼び出し側が
-    /// `subscribe` を呼び直すと消える。
+    /// 可能性があるため)。2 度目の匿名の拒否では自動の書き直しだけをやめる。
+    /// 望ましい集合も送った集合も変えないので、差分は unsubscribe も書かない。
+    /// 望みは残るので、再接続はそのチャネルを送り直す。望みを外すと、有効な
+    /// チャネルが呼び出し側に知らされないまま購読から消える。チャネル自体が
+    /// 無効なら、書き直しを続けず 1.05 秒ごとに同じコマンドを送り続けることも
+    /// ない。印は帰属が戻るか、呼び出し側が `subscribe` を呼び直すと消える。
     fn reject_anonymously(&mut self, desired: &mut BTreeMap<<C as Codec>::Key, C>) {
         let Some((_, Written::Subscribe { channel, .. })) = &self.last else {
             return;
@@ -293,7 +297,7 @@ impl<C: FeedChannel> Sent<C> {
             return;
         }
         if self.retried.contains(&key) {
-            desired.remove(&key);
+            self.retries.remove(&key);
         } else {
             self.retried.insert(key.clone());
             self.retries.insert(key);
@@ -1114,10 +1118,11 @@ mod tests {
         );
     }
 
-    /// 同じチャネルが 2 度目の匿名の拒否で返ってきたら、望みも外して自動の
-    /// 書き直しをやめる。チャネル自体が無効なとき、1.05 秒ごとに同じコマンドを
-    /// 送り続けて IP ごとの枠を使い切らないためである (issue #23 のレビュー
-    /// 指摘)。送った集合は残すので、差分は unsubscribe を書ける。
+    /// 同じチャネルが 2 度目の匿名の拒否で返ってきたら、自動の書き直しだけを
+    /// やめる。チャネル自体が無効なとき、1.05 秒ごとに同じコマンドを送り続けて
+    /// IP ごとの枠を使い切らないためである (issue #23 のレビュー指摘)。望ましい
+    /// 集合も送った集合も変えないので、差分は unsubscribe も書かない。望みは
+    /// 残るので、再接続で購読が戻る。
     #[test]
     fn a_second_anonymous_rejection_stops_rewriting_the_channel() {
         let ticker = PublicChannel::Ticker(Symbol::ETH);
@@ -1144,12 +1149,16 @@ mod tests {
         sent.retries.remove(&ticker.key());
         assert_eq!(sent.rejected(&mut desired), None);
         assert!(
-            !desired.contains_key(&ticker.key()),
-            "the second anonymous rejection must not be written again"
+            desired.contains_key(&ticker.key()),
+            "an anonymous rejection must not change the desired set"
         );
         assert!(
-            !sent.retries.contains(&ticker.key()) && sent.subscribed.contains_key(&ticker.key()),
-            "the sent state stays so the difference writes one unsubscribe"
+            sent.subscribed.contains_key(&ticker.key()) && !sent.retries.contains(&ticker.key()),
+            "the automatic rewrite stops and the sent state stays"
+        );
+        assert!(
+            next_command::<PublicChannel>(&desired, &sent.subscribed, &sent.retries).is_none(),
+            "the difference writes neither a subscribe nor an unsubscribe"
         );
     }
 
