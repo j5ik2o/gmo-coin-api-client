@@ -84,6 +84,6 @@ cargo deny check advisories licenses
 
 最初の 0.1.0 は版を上げる PR を作らない。加藤さんが今の main に `v0.1.0` を push する。`lib-bump-version` は `v*` タグがないときに、この手順を促すメッセージを出して止まる。
 
-公開は加藤さんが GitHub の Environment (`crates-io`) で承認する。`lib-release` のジョブにこの Environment を付けてあり、Environment に必須レビュアーを設定すると、承認が済むまでジョブは実行を始めない。
+公開は加藤さんが GitHub の Environment (`crates-io`) で承認する。`lib-bump-version` と `lib-release` のジョブにこの Environment を付けてあり、Environment に必須レビュアーを設定すると、承認が済むまでジョブは実行を始めない。
 
 公開に使う `CARGO_REGISTRY_TOKEN` は、リポジトリの secret ではなく Environment `crates-io` の secret に置く。登録は加藤さんが自分で行う。
