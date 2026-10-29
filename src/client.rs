@@ -79,11 +79,22 @@ impl Client<Anonymous> {
     /// # エラー
     /// 失敗しない。
     pub fn new(endpoints: Endpoints, config: Config) -> Self {
+        Self::with_connector(endpoints, config, Connector::new())
+    }
+
+    /// 指定したコネクタで組み立てる。[`Client::new`] は webpki のルートを
+    /// 使うコネクタを渡し、テストはフィクスチャの証明書を信頼するコネクタを
+    /// 渡す。
+    pub(crate) fn with_connector(
+        endpoints: Endpoints,
+        config: Config,
+        connector: Connector,
+    ) -> Self {
         let limits = config.limits;
         let inner = Inner {
             endpoints,
             config,
-            connector: Connector::new(),
+            connector,
             public_pool: Pool::new(limits.max_idle_connections, limits.max_inflight_requests),
             private_pool: Pool::new(limits.max_idle_connections, limits.max_inflight_requests),
             public_ws_pacer: Pacer::new(),
