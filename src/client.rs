@@ -1,7 +1,7 @@
 //! クライアントのハンドルとその設定。
 
 use core::fmt;
-use core::num::NonZeroU32;
+use core::num::{NonZeroU8, NonZeroU32};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -90,13 +90,13 @@ impl Client<Anonymous> {
         config: Config,
         connector: Connector,
     ) -> Self {
-        let max_idle = config.limits.max_idle_connections;
+        let limits = config.limits;
         let inner = Inner {
             endpoints,
             config,
             connector,
-            public_pool: Pool::new(max_idle),
-            private_pool: Pool::new(max_idle),
+            public_pool: Pool::new(limits.max_idle_connections, limits.max_inflight_requests),
+            private_pool: Pool::new(limits.max_idle_connections, limits.max_inflight_requests),
             public_ws_pacer: Pacer::new(),
             private_ws_pacer: Pacer::new(),
         };
@@ -172,6 +172,7 @@ impl Default for Config {
                 max_response_bytes: ByteLimit::new(8 * 1024 * 1024).expect("within range"),
                 max_ws_message_bytes: ByteLimit::new(1024 * 1024).expect("within range"),
                 max_idle_connections: 8,
+                max_inflight_requests: NonZeroU8::new(8).expect("8 is not zero"),
                 max_subscriptions: 64,
             },
             reconnect: Backoff::new(secs(1), secs(60)).expect("initial <= max"),
@@ -232,7 +233,11 @@ impl Timeout {
 }
 
 /// 既定値: 応答本文 8 MiB、WebSocket メッセージ 1 MiB、REST ベースごとに
-/// アイドル接続 8 本、フィードごとに購読 64 件。
+/// アイドル接続 8 本と同時実行 8 件、フィードごとに購読 64 件。
+///
+/// 同時実行の既定はアイドル接続の既定と同じ 8 なので、1 つの REST ベースで
+/// 生きている接続は、送信中とアイドルを合わせても 8 本を超えない (接続は
+/// 常にどちらか一方が所有する)。
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
     /// `Content-Length`、またはチャンクごとの累計に対して、バイトをバッファ
@@ -243,6 +248,13 @@ pub struct Limits {
     pub max_ws_message_bytes: ByteLimit,
     /// REST ベースごとに保持するアイドル接続の最大本数。
     pub max_idle_connections: u8,
+    /// REST ベースごとに同時に処理する (送信中の) リクエストの最大数。
+    ///
+    /// 接続の取り出しから応答の読み終えまでを 1 件と数え、上限に達している
+    /// 呼び出しは空くまで順番に待つ。接続、TLS ハンドシェイク、hyper の接続
+    /// タスクの数を有界にするためのもので、取引所への呼び出し回数は間引かない。
+    /// 0 は取れない (`NonZeroU8`)。0 ではどの REST 呼び出しも永久に待つ。
+    pub max_inflight_requests: NonZeroU8,
     /// フィードごとの購読数の上限。
     pub max_subscriptions: u8,
 }
@@ -341,6 +353,7 @@ mod tests {
         assert_eq!(c.limits.max_response_bytes.get(), 8 * 1024 * 1024);
         assert_eq!(c.limits.max_ws_message_bytes.get(), 1024 * 1024);
         assert_eq!(c.limits.max_idle_connections, 8);
+        assert_eq!(c.limits.max_inflight_requests.get(), 8);
         assert_eq!(c.limits.max_subscriptions, 64);
         assert_eq!(c.reconnect.delay(0), Duration::from_secs(1));
         assert_eq!(c.reconnect.delay(3), Duration::from_secs(8));

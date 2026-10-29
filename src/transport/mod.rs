@@ -4,9 +4,9 @@
 //! hyper、WebSocket は tokio-tungstenite、TLS は rustls (ring プロバイダ、
 //! webpki-roots のルート証明書)。このモジュールが自前で持つのは、接続の
 //! 作り方 (ループバック限定の平文、それ以外は TLS)、ルートごとの有界な
-//! アイドル接続プール、`Limits` に基づくサイズ上限、そしてライブラリの
-//! エラーを「種類だけ」のエラーへ写す変換である。hyper、http、rustls、
-//! tungstenite の型は公開シグネチャに一切現れない。
+//! アイドル接続プールと同時実行の上限、`Limits` に基づくサイズ上限、そして
+//! ライブラリのエラーを「種類だけ」のエラーへ写す変換である。hyper、http、
+//! rustls、tungstenite の型は公開シグネチャに一切現れない。
 //!
 //! # 残存リスク
 //! `API-KEY` と `API-SIGN` ヘッダは hyper の `HeaderMap` に、`ws-auth` の
