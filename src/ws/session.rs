@@ -443,6 +443,12 @@ fn extra_backoff_steps(reason: &DisconnectReason) -> u32 {
     }
 }
 
+/// セッションがこの失敗のあとに使う、バックオフの梯子の段数。`Backoff::cap`
+/// と `Backoff::delay` にはこの段数を渡す。
+fn backoff_step(attempt: u32, reason: &DisconnectReason) -> u32 {
+    attempt.saturating_add(extra_backoff_steps(reason))
+}
+
 fn sleep_until(at: Instant) -> tokio::time::Sleep {
     tokio::time::sleep_until(tokio::time::Instant::from_std(at))
 }
@@ -532,7 +538,7 @@ impl<C: FeedChannel> Session<C> {
 
     /// `Waiting` に移り、`Disconnected` を作る。進行中の延長は捨てる。
     fn disconnected(&mut self, reason: DisconnectReason) -> <C as Codec>::Event {
-        let step = self.attempt.saturating_add(extra_backoff_steps(&reason));
+        let step = backoff_step(self.attempt, &reason);
         let delay = self.inner.config.reconnect.delay(step);
         self.attempt = self.attempt.saturating_add(1);
         self.state = State::Waiting {
@@ -1049,14 +1055,11 @@ mod tests {
         }
     }
 
-    /// 既定の設定では、ERR-5003 のあとに引く待ち時間は、乱数がいちばん小さい
-    /// 値を返しても 1 秒の購読コマンドの枠より長い。full jitter (下限 0) に
-    /// 変えると、ここが 0 秒近くまで縮んで落ちる。
-    #[test]
-    fn a_rate_limit_waits_past_the_one_second_window_even_with_the_smallest_draw() {
+    /// ERR-5003 (`POST ws-auth` の呼び出し上限) の失敗。
+    fn rate_limited_reason() -> DisconnectReason {
         use crate::error::{ApiError, ApiMessage};
 
-        let rate_limited = DisconnectReason::Api(ApiError {
+        DisconnectReason::Api(ApiError {
             operation: "POST /v1/ws-auth",
             status: 1,
             messages: vec![ApiMessage {
@@ -1064,14 +1067,42 @@ mod tests {
                 text: "Requests are too many.".into(),
             }],
             response_time: None,
-        });
-        let step = extra_backoff_steps(&rate_limited);
+        })
+    }
+
+    /// 既定の設定では、ERR-5003 のあとに引く待ち時間は、乱数がいちばん小さい
+    /// 値を返しても 1 秒の購読コマンドの枠より長い。full jitter (下限 0) に
+    /// 変えると、ここが 0 秒近くまで縮んで落ちる。
+    #[test]
+    fn a_rate_limit_waits_past_the_one_second_window_even_with_the_smallest_draw() {
+        let step = backoff_step(0, &rate_limited_reason());
         assert_eq!(step, 2, "ERR-5003 starts two rungs down the ladder");
         let backoff = crate::client::Config::default().reconnect;
         let smallest = backoff.delay_with(step, |_| Some(0));
         assert!(
             smallest > Duration::from_secs(1),
             "the smallest wait after ERR-5003 is {smallest:?}"
+        );
+    }
+
+    /// ERR-5003 の経路では、セッションが次に使う段数は 2 段先で、その cap は
+    /// 結合テスト (`tests/ws_feed.rs` の `fast_client`) の設定 (20 ms..80 ms) で
+    /// ちょうど 80 ms になる。段数が 1 でも 3 でも、乱数に関係なくここで落ちる。
+    ///
+    /// 段数そのものも確かめるのは、この設定では 2 段目以降が `max` に飽和し、
+    /// cap だけでは 2 段と 3 段を区別できないからである。
+    #[test]
+    fn a_rate_limit_uses_the_second_rung_whose_cap_is_eighty_milliseconds() {
+        use crate::client::Timeout;
+
+        let step = backoff_step(0, &rate_limited_reason());
+        assert_eq!(step, 2, "ERR-5003 starts two rungs down the ladder");
+        let ms = |n| Timeout::new(Duration::from_millis(n)).unwrap();
+        let backoff = Backoff::new(ms(20), ms(80)).unwrap();
+        assert_eq!(
+            backoff.cap(step),
+            Duration::from_millis(80),
+            "the cap of the rung the session will use next"
         );
     }
 
