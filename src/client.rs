@@ -297,6 +297,13 @@ impl ByteLimit {
 /// フィードの再接続間隔: `initial` から始めて失敗ごとに倍にし、`max` で
 /// 頭打ちにする。接続が `max` の間維持されたらリセットする。既定は 1 秒、60 秒。
 ///
+/// 待ち時間にはばらつき (equal jitter) を加える。上限 `cap` に対して
+/// `cap/2` 以上 `cap` 以下の一様乱数を返すので、同じ設定でも試行のたびに
+/// 値が変わり、`cap` を超えない。複数のフィードが同じ瞬間に再接続し、
+/// 購読コマンドが同じ 1 秒の窓に集中して IP ごとの上限に当たるのを避ける
+/// ためである。`cap/2` を下回らないので、呼び出し回数の上限 (ERR-5003) で
+/// 梯子を 2 段進める判断が、「少なくとも `cap/2` は待つ」という意味を保つ。
+///
 /// # 不変条件
 /// `initial <= max`。
 #[derive(Clone, Copy, Debug)]
@@ -312,7 +319,8 @@ impl Backoff {
     /// なし。
     ///
     /// # 事後条件
-    /// `Ok` なら `delay(n)` は `n` が増えても減らず、`max` を超えない。
+    /// `Ok` なら `cap(n)` は `n` が増えても減らず、`max` を超えない。
+    /// `delay(n)` は `[cap(n)/2, cap(n)]` の乱数なので、これも `max` を超えない。
     ///
     /// # エラー
     /// `Semantics("initial > max")`。
@@ -326,8 +334,11 @@ impl Backoff {
         Ok(Self { initial, max })
     }
 
-    /// `attempt` 回目 (0 始まり) の試行の前に置く遅延。
-    pub(crate) fn delay(&self, attempt: u32) -> Duration {
+    /// `attempt` 回目 (0 始まり) の試行の待ち時間の上限。ばらつきを含まない。
+    ///
+    /// 16 段で倍々が飽和し、`initial` が `max / 65536` より小さい設定では
+    /// `max` を下回ることがある。
+    pub(crate) fn cap(&self, attempt: u32) -> Duration {
         debug_assert!(
             self.initial.get() <= self.max.get(),
             "Backoff::new keeps initial <= max"
@@ -338,6 +349,33 @@ impl Backoff {
             .saturating_mul(factor)
             .min(self.max.get())
     }
+
+    /// `attempt` 回目 (0 始まり) の試行の前に置く遅延。`cap(attempt)` に対する
+    /// equal jitter で、`cap/2` 以上 `cap` 以下の一様乱数である。同じ設定でも
+    /// 呼ぶたびに値が変わる。
+    pub(crate) fn delay(&self, attempt: u32) -> Duration {
+        let cap = self.cap(attempt);
+        let cap_nanos = u64::try_from(cap.as_nanos()).unwrap_or(u64::MAX);
+        let half = cap_nanos / 2;
+        // 乱数源が失敗したときは上限側に倒す。待ち時間の上限という不変条件は
+        // 乱数源の成否に依存しない。
+        let extra = random_below(half).unwrap_or(half);
+        Duration::from_nanos(half.saturating_add(extra))
+    }
+}
+
+/// `[0, bound)` の一様乱数。乱数源は、TLS のために既に依存している ring の
+/// `SystemRandom` を使う。失敗したときは `None`。
+fn random_below(bound: u64) -> Option<u64> {
+    use ring::rand::SecureRandom;
+    if bound == 0 {
+        return Some(0);
+    }
+    let mut bytes = [0u8; 8];
+    ring::rand::SystemRandom::new().fill(&mut bytes).ok()?;
+    // `2^64` は `bound` (最大 600 秒 = 6e11 ナノ秒) より桁違いに大きいので、
+    // 剰余による偏りは無視できる。
+    Some(u64::from_le_bytes(bytes) % bound)
 }
 
 #[cfg(test)]
@@ -355,9 +393,35 @@ mod tests {
         assert_eq!(c.limits.max_idle_connections, 8);
         assert_eq!(c.limits.max_inflight_requests.get(), 8);
         assert_eq!(c.limits.max_subscriptions, 64);
-        assert_eq!(c.reconnect.delay(0), Duration::from_secs(1));
-        assert_eq!(c.reconnect.delay(3), Duration::from_secs(8));
-        assert_eq!(c.reconnect.delay(40), Duration::from_secs(60));
+        assert_eq!(c.reconnect.cap(0), Duration::from_secs(1));
+        assert_eq!(c.reconnect.cap(3), Duration::from_secs(8));
+        assert_eq!(c.reconnect.cap(40), Duration::from_secs(60));
+    }
+
+    /// ばらつきは呼ぶたびに変わり、梯子の上限を超えない。下限は上限の半分である。
+    #[test]
+    fn the_reconnect_delay_is_jittered_within_half_the_cap() {
+        use std::collections::BTreeSet;
+
+        let secs = |n| Timeout::new(Duration::from_secs(n)).unwrap();
+        let backoff = Backoff::new(secs(1), secs(60)).unwrap();
+        for attempt in [0u32, 1, 3, 10, u32::MAX] {
+            let cap = backoff.cap(attempt);
+            let mut seen = BTreeSet::new();
+            for _ in 0..16 {
+                let delay = backoff.delay(attempt);
+                assert!(
+                    cap / 2 <= delay && delay <= cap,
+                    "attempt {attempt}: {delay:?} is outside [{:?}, {cap:?}]",
+                    cap / 2
+                );
+                seen.insert(delay);
+            }
+            assert!(
+                seen.len() > 1,
+                "attempt {attempt}: every delay was identical, so there is no jitter"
+            );
+        }
     }
 
     #[test]

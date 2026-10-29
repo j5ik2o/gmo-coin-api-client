@@ -539,11 +539,13 @@ impl<C: FeedChannel> Session<C> {
     }
 
     /// 生きていた接続を捨てる。バックオフの最上段 (`Backoff` の `max`。
-    /// `delay` は 16 段で飽和するので、`initial` が `max / 65536` より
+    /// `cap` は 16 段で飽和するので、`initial` が `max / 65536` より
     /// 小さい設定でだけ `max` を下回る) の間維持されていたら試行回数を戻す。
+    /// ばらつきのある `delay` ではなく `cap` と比べる。比べるたびに閾値が
+    /// 変わると、リセットの判断が乱数に左右される。
     fn drop_connection(&mut self, reason: DisconnectReason) -> <C as Codec>::Event {
         if let State::Connected(conn, _) = &self.state
-            && conn.connected_at.elapsed() >= self.inner.config.reconnect.delay(u32::MAX)
+            && conn.connected_at.elapsed() >= self.inner.config.reconnect.cap(u32::MAX)
         {
             self.attempt = 0;
         }

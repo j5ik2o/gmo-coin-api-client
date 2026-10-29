@@ -620,28 +620,30 @@ async fn a_reused_token_rejected_at_the_handshake_is_replaced_once_then_the_feed
 
 /// `POST ws-auth` の一時的な失敗は `Disconnected` になり、次の試行で
 /// 取り直す。ERR-5003 はバックオフの梯子を 2 段先 (4 倍) から始める。
+/// 待ち時間にはばらつきがあるので、実際の値は梯子の上限の半分から上限まで
+/// の範囲で確かめる。
 #[tokio::test]
 async fn transient_ws_auth_failures_are_retried_and_rate_limit_waits_longer() {
     struct Case {
         reply: Reply,
         check: fn(&DisconnectReason) -> bool,
-        retry_in: Duration,
+        cap: Duration,
     }
     let cases = [
         Case {
             reply: Reply::Json(api_error("ERR-554", "Server unavailable.")),
             check: |r| matches!(r, DisconnectReason::Api(e) if e.has(ErrorCode::SERVER_UNAVAILABLE)),
-            retry_in: Duration::from_millis(20),
+            cap: Duration::from_millis(20),
         },
         Case {
             reply: Reply::Json(api_error("ERR-5008", "Timestamp too late.")),
             check: |r| matches!(r, DisconnectReason::Api(e) if e.has(ErrorCode::TIMESTAMP_TOO_LATE)),
-            retry_in: Duration::from_millis(20),
+            cap: Duration::from_millis(20),
         },
         Case {
             reply: Reply::Json(api_error("ERR-5003", "Requests are too many.")),
             check: |r| matches!(r, DisconnectReason::Api(e) if e.has(ErrorCode::RATE_LIMIT)),
-            retry_in: Duration::from_millis(80),
+            cap: Duration::from_millis(80),
         },
         Case {
             reply: Reply::Status {
@@ -649,7 +651,7 @@ async fn transient_ws_auth_failures_are_retried_and_rate_limit_waits_longer() {
                 body: "<html>bad gateway</html>".to_owned(),
             },
             check: |r| matches!(r, DisconnectReason::Protocol(p) if *p.kind() == ProtocolErrorKind::HttpStatus(502)),
-            retry_in: Duration::from_millis(20),
+            cap: Duration::from_millis(20),
         },
     ];
     for case in cases {
@@ -665,7 +667,14 @@ async fn transient_ws_auth_failures_are_retried_and_rate_limit_waits_longer() {
         match feed.next().await {
             Ok(PrivateEvent::Disconnected(d)) => {
                 assert!((case.check)(&d.reason), "{:?}: {:?}", case.reply, d.reason);
-                assert_eq!(d.retry_in, case.retry_in, "{:?}", case.reply);
+                assert!(
+                    case.cap / 2 <= d.retry_in && d.retry_in <= case.cap,
+                    "{:?}: retry_in {:?} is outside [{:?}, {:?}]",
+                    case.reply,
+                    d.retry_in,
+                    case.cap / 2,
+                    case.cap
+                );
             }
             other => panic!("{:?}: {other:?}", case.reply),
         }
