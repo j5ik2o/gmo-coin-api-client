@@ -540,15 +540,14 @@ impl Client<Authenticated> {
     ///   読めなかった `Protocol`): 同じ `NewOrder` (同じ `client_order_id`) を
     ///   再送する。発注されるのは高々一度で、最初の試行が発注されていれば
     ///   再送は ERR-915 で拒否される。`accepted_but_unreadable()` も真なら
-    ///   発注は確定しているので、再送せずに照会してよい。
+    ///   発注は確定しているので、再送せずに照会してよい。再送と照会を 1 つの
+    ///   手順にまとめた例は、README の「注文を出す」にある。
     ///
     /// # 例
-    /// 結果不明なら同じ注文を再送し、ERR-915 なら顧客注文 ID で照会する。
     /// ```no_run
-    /// # async fn run(client: gmo_coin_api_client::Client<gmo_coin_api_client::Authenticated>) -> Result<(), Box<dyn std::error::Error>> {
-    /// use gmo_coin_api_client::error::ErrorCode;
-    /// use gmo_coin_api_client::rest::{NewOrder, OrderExecution, OrderLookup};
-    /// use gmo_coin_api_client::{Batch, ClientOrderId, Error, LimitTimeInForce, OrderPrice, OrderSize, Side, Symbol};
+    /// # async fn run(client: gmo_coin_api_client::Client<gmo_coin_api_client::Authenticated>) -> gmo_coin_api_client::Result<()> {
+    /// use gmo_coin_api_client::rest::{NewOrder, OrderExecution};
+    /// use gmo_coin_api_client::{ClientOrderId, LimitTimeInForce, OrderPrice, OrderSize, Side, Symbol};
     /// let order = NewOrder {
     ///     client_order_id: ClientOrderId::generate(),
     ///     symbol: Symbol::BTC,
@@ -560,19 +559,7 @@ impl Client<Authenticated> {
     ///         losscut_price: None,
     ///     },
     /// };
-    /// let id = match client.place_order(&order).await {
-    ///     Ok(id) => id,
-    ///     Err(e) if e.outcome_unknown() => match client.place_order(&order).await {
-    ///         Ok(id) => id,
-    ///         Err(Error::Api(api)) if api.has(ErrorCode::CLIENT_ORDER_ID_USED) => {
-    ///             let lookup = OrderLookup::ByClientOrderIds(Batch::one(order.client_order_id.clone()));
-    ///             let orders = client.orders(&lookup).await?;
-    ///             orders.first().ok_or("ERR-915 なのに注文が照会できない")?.order_id
-    ///         }
-    ///         Err(e) => return Err(e.into()),
-    ///     },
-    ///     Err(e) => return Err(e.into()),
-    /// };
+    /// let id = client.place_order(&order).await?;
     /// println!("{id}");
     /// # Ok(()) }
     /// ```
