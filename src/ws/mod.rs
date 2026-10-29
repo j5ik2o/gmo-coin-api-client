@@ -303,7 +303,10 @@ impl<C: FeedChannel> Feed<C> {
     /// `C` 自身の不変条件以外にはない。
     ///
     /// # 事後条件
-    /// ペーサのスロットを得た次の `next` 呼び出しが subscribe を送る。
+    /// ペーサのスロットを得た次の `next` 呼び出しが subscribe を送る。ただし、
+    /// 拒否の窓が閉じたあとに呼んだ subscribe は、そのチャネルがまだ「送った」
+    /// 集合に残っているため送り直さない。購読は次の再接続で戻る
+    /// (<https://github.com/j5ik2o/gmo-coin-api-client/issues/43>)。
     ///
     /// # エラー
     /// 集合が既に `Limits::max_subscriptions` 件のキーを持つとき

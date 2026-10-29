@@ -26,5 +26,6 @@ allow = [
 confidence-threshold = 0.8
 
 [licenses.private]
-# このクレートは publish = false で、公開するのは加藤さんの承認後である。
+# このクレートは crates.io に公開するので、ライセンスは上の allow で検査する。
+# ローカルでだけ使うクレートを足したときのために、未公開のクレートは免除する。
 ignore = true
