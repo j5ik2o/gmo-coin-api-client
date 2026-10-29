@@ -25,9 +25,10 @@ jobs:
     # レビューしていないコミットを版上げの対象にしてしまうので、main だけに限る。
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    # PR はこのワークフローでは開かない（人が開く）。理由は
+    # docs/release.md の「版上げの PR は人が開く」に書いてある。
     permissions:
       contents: write
-      pull-requests: write
     env:
       PACKAGE_ID: gmo-coin-api-client
     steps:
@@ -114,11 +115,9 @@ jobs:
       - name: bump version
         run: |
           cargo set-version -p ${{ steps.defines.outputs.package_id }} ${{ steps.versions.outputs.next_version }}
-      - name: Open a release pull request
+      - name: Push the release branch
         env:
-          GH_TOKEN: ${{ github.token }}
           NEXT_TAG: ${{ steps.versions.outputs.next_tag }}
-          PREV_TAG: ${{ steps.defines.outputs.prev_tag }}
         run: |
           set -euo pipefail
           BRANCH="chore/release-$NEXT_TAG"
@@ -128,6 +127,17 @@ jobs:
           git add Cargo.toml Cargo.lock
           git commit -m "chore: release $NEXT_TAG"
           git push origin "$BRANCH"
+      # 版上げの PR は人が開く。GITHUB_TOKEN で起こしたイベントでは CI が走らず
+      # （workflow_dispatch と repository_dispatch を除く）、設定
+      # 「Allow GitHub Actions to create and approve pull requests」も無効のため、
+      # このワークフローからは PR を作れない。人が開いた PR では pull_request の
+      # opened が起こり、CI が普通に実行される。詳しくは docs/release.md を参照する。
+      - name: Write the release notes and the next step
+        env:
+          NEXT_TAG: ${{ steps.versions.outputs.next_tag }}
+          PREV_TAG: ${{ steps.defines.outputs.prev_tag }}
+        run: |
+          set -euo pipefail
           python3 "${GITHUB_WORKSPACE}"/.github/create-release-note-header.py \
             ${{ github.server_url }} \
             ${{ github.repository }} \
@@ -136,8 +146,29 @@ jobs:
             > release-notes.md
           git log "$PREV_TAG"..HEAD --no-merges --format='%H%x1f%s%x1f%b%x1e' \
             | python3 "${GITHUB_WORKSPACE}"/.github/create-release-note-body.py "${{ github.server_url }}" "${{ github.repository }}" >> release-notes.md
-          gh pr create \
-            --base main \
-            --head "$BRANCH" \
-            --title "chore: release $NEXT_TAG" \
-            --body-file release-notes.md
+          cat <<EOF >> "$GITHUB_STEP_SUMMARY"
+          ## 版上げの PR は人が開く
+
+          枝 \`chore/release-$NEXT_TAG\` を push した。次のどちらかで PR を開く。
+
+          コマンドで開く場合（この実行のアーティファクト \`release-notes\` をダウンロードしておく）:
+
+          \`\`\`sh
+          gh run download <この実行の ID> -n release-notes -D release-notes-dir
+          gh pr create --base main --head chore/release-$NEXT_TAG \\
+            --title "chore: release $NEXT_TAG" \\
+            --body-file release-notes-dir/release-notes.md
+          \`\`\`
+
+          画面で開く場合は、ブランチの一覧に出る「Compare & pull request」から開き、
+          タイトルを \`chore: release $NEXT_TAG\`、本文を下のリリースノートにする。
+
+          PR を開くと CI（check・release-control・audit）と GitGuardian が実行される。
+
+          EOF
+          cat release-notes.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-notes
+          path: release-notes.md
+          if-no-files-found: error
