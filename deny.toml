@@ -1,0 +1,30 @@
+# cargo-deny configuration
+# Run: cargo deny check advisories licenses
+
+[graph]
+# 依存の全体を見るため、任意の feature も含めて調べる。
+all-features = true
+
+[advisories]
+# 対応していない助言が 1 件でもあれば失敗する。除外を足すときは、
+# なぜ当てはまらないかをコメントに書く。
+# 推移的な依存の unsound の勧告も落とす（既定は workspace だけを見る）。
+unsound = "all"
+
+[licenses]
+# いまの依存に現れる許諾的なライセンスだけを許す。GPL / AGPL / LGPL は
+# 入れていないので、将来の依存が持ち込んだときにこの検査で止まる。
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "BSD-3-Clause",
+  "ISC",
+  "Unicode-3.0",
+  # webpki-roots が同梱する Mozilla のルート証明書のライセンス。
+  "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.8
+
+[licenses.private]
+# このクレートは publish = false で、公開するのは加藤さんの承認後である。
+ignore = true

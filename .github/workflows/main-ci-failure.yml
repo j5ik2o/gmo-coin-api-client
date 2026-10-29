@@ -1,0 +1,148 @@
+# main の CI が失敗したら issue を作る（同じ失敗が続くときは、開いている issue にコメントを足す）。
+# 手本は j5ik2o/event-store-adapter-rs の .github/workflows/main-ci-failure.yml。
+# 写すときに替えるのは、下の `on.workflow_run.workflows` の 1 か所だけ。
+# CI のワークフローの `name:` に合わせる（このリポジトリは "CI"）。
+# このワークフローは `CI Success` の依存やブランチ保護に入れない（マージを止める仕組みではない）。
+name: main-ci-failure
+
+on:
+  workflow_run:
+    workflows: ["CI"] # ← 写すときに替える 1 か所（CI のワークフローの name）
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "確かめたい過去の CI の実行の ID"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  LABEL: ci-failure-on-main
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      issues: write
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: 元の実行を調べる
+        id: run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.event_name == 'workflow_dispatch' && inputs.run_id || github.event.workflow_run.id }}
+        run: |
+          set -euo pipefail
+          case "$RUN_ID" in
+            ''|*[!0-9]*) echo "::error::run_id は数字だけで指定する: $RUN_ID"; exit 1 ;;
+          esac
+          gh api "repos/$REPO/actions/runs/$RUN_ID" > run.json
+          event=$(jq -r '.event' run.json)
+          branch=$(jq -r '.head_branch' run.json)
+          workflow_path=$(jq -r '.path' run.json)
+          conclusion=$(jq -r '.conclusion // ""' run.json)
+          {
+            echo "event=$event"
+            echo "branch=$branch"
+            echo "workflow_path=$workflow_path"
+            echo "conclusion=$conclusion"
+            echo "url=$(jq -r '.html_url' run.json)"
+            echo "sha=$(jq -r '.head_sha' run.json)"
+            echo "run_number=$(jq -r '.run_number' run.json)"
+            echo "run_attempt=$(jq -r '.run_attempt' run.json)"
+          } >> "$GITHUB_OUTPUT"
+          # workflow_dispatch の run_id には、同じリポジトリの別のワークフローの実行も指定できる。
+          # CI 以外の実行を対象にしないよう、ワークフローのファイルで確かめる。
+          if [ "$workflow_path" != ".github/workflows/ci.yml" ]; then
+            echo "target=false" >> "$GITHUB_OUTPUT"
+            echo "CI 以外のワークフローの実行（workflow_path=$workflow_path）なので何もしない"
+            exit 0
+          fi
+          if [ "$branch" = "main" ] && { [ "$event" = "push" ] || [ "$event" = "schedule" ]; }; then
+            echo "target=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "target=false" >> "$GITHUB_OUTPUT"
+            echo "対象外の実行（branch=$branch, event=$event）なので何もしない"
+          fi
+
+      - name: 失敗を知らせる
+        # 時間切れ（timed_out）と起動の失敗（startup_failure）も失敗として扱う
+        if: steps.run.outputs.target == 'true' && contains(fromJSON('["failure", "timed_out", "startup_failure"]'), steps.run.outputs.conclusion)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.event_name == 'workflow_dispatch' && inputs.run_id || github.event.workflow_run.id }}
+          RUN_URL: ${{ steps.run.outputs.url }}
+          SHA: ${{ steps.run.outputs.sha }}
+          EVENT: ${{ steps.run.outputs.event }}
+          RUN_NUMBER: ${{ steps.run.outputs.run_number }}
+          RUN_ATTEMPT: ${{ steps.run.outputs.run_attempt }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "schedule" ]; then trigger="定期実行 (schedule)"; else trigger="push"; fi
+          failed_jobs=$(gh api --paginate "repos/$REPO/actions/runs/$RUN_ID/jobs" \
+            --jq '.jobs[] | select(.conclusion == "failure" or .conclusion == "timed_out") | "  - " + .name')
+          if [ -z "$failed_jobs" ]; then failed_jobs="  - （失敗したジョブを取得できなかった。実行の URL で確かめる）"; fi
+          {
+            echo "main の CI が失敗した。"
+            echo
+            echo "- 実行: $RUN_URL"
+            echo "- コミット: $SHA"
+            echo "- きっかけ: $trigger"
+            echo "- 失敗したジョブ:"
+            echo "$failed_jobs"
+            echo
+            # 実行番号と試行の回数（流し直しで増える）から作る順序の値
+            echo "<!-- ci-run-key: $((RUN_NUMBER * 1000 + RUN_ATTEMPT)) -->"
+          } > body.md
+
+          if ! gh api "repos/$REPO/labels/$LABEL" > /dev/null 2>&1; then
+            gh label create "$LABEL" --repo "$REPO" --color B60205 --force \
+              --description "main の CI の失敗（自動で作る）"
+          fi
+
+          number=$(gh issue list --repo "$REPO" --label "$LABEL" --state open \
+            --limit 1 --json number --jq '.[0].number // empty')
+          if [ -z "$number" ]; then
+            gh issue create --repo "$REPO" --label "$LABEL" \
+              --title "main の CI が失敗した" --body-file body.md
+          else
+            gh issue comment "$number" --repo "$REPO" --body-file body.md
+          fi
+
+      - name: 成功したので issue を閉じる
+        if: steps.run.outputs.target == 'true' && steps.run.outputs.conclusion == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ steps.run.outputs.url }}
+          RUN_NUMBER: ${{ steps.run.outputs.run_number }}
+          RUN_ATTEMPT: ${{ steps.run.outputs.run_attempt }}
+        run: |
+          set -euo pipefail
+          key=$((RUN_NUMBER * 1000 + RUN_ATTEMPT))
+          numbers=$(gh issue list --repo "$REPO" --label "$LABEL" --state open \
+            --limit 100 --json number --jq '.[].number')
+          for number in $numbers; do
+            # CI の実行は重なりうるので、記録した最後の失敗より新しい成功（流し直しを含む）でだけ閉じる。
+            # ci-run-key は第三者が同じ印を書けるので、github-actions[bot]（user.type が Bot）が
+            # 書いた本文とコメントだけから読む。判定は .github/failure-run-key.py とそのテストにある。
+            gh api "repos/$REPO/issues/$number" > issue.json
+            gh api --paginate --slurp "repos/$REPO/issues/$number/comments" > comments.json
+            last_failure=$(python3 "${GITHUB_WORKSPACE}"/.github/failure-run-key.py issue.json comments.json)
+            if [ "$key" -gt "$last_failure" ]; then
+              gh issue close "$number" --repo "$REPO" \
+                --comment "main の CI が成功した: $RUN_URL"
+            else
+              echo "issue #$number の最後の失敗（$last_failure）より古い成功（$key）なので閉じない"
+            fi
+          done

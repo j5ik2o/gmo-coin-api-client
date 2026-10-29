@@ -1,0 +1,38 @@
+name: lib-release
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-*'
+env:
+  CARGO_TERM_COLOR: always
+permissions:
+  contents: read
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    environment: crates-io
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+      - name: Check the tag against the crate version
+        run: |
+          set -euo pipefail
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          CRATE_VERSION=$(cargo metadata --no-deps --format-version 1 --manifest-path Cargo.toml \
+            | jq -r '.packages[] | select(.name == "gmo-coin-api-client") | .version')
+          echo "tag=$GITHUB_REF_NAME, tag version=$TAG_VERSION, crate version=$CRATE_VERSION"
+          if [[ "$TAG_VERSION" != "$CRATE_VERSION" ]]; then
+            echo "::error::The tag version ($TAG_VERSION) does not match the crate version in Cargo.toml ($CRATE_VERSION)."
+            exit 1
+          fi
+      - name: release the crate
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          cargo publish -p gmo-coin-api-client

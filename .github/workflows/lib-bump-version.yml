@@ -1,0 +1,143 @@
+name: lib-bump-version
+on:
+  workflow_dispatch:
+    inputs:
+      level:
+        description: Version bump level
+        type: choice
+        required: true
+        default: auto
+        options:
+          - auto
+          - patch
+          - minor
+          - major
+      version:
+        description: Exact next version (X.Y.Z); when set, level is ignored
+        type: string
+        required: false
+        default: ''
+permissions:
+  contents: read
+jobs:
+  bump-version:
+    # workflow_dispatch は任意の枝やタグで実行できる。main 以外で動かすと、
+    # レビューしていないコミットを版上げの対象にしてしまうので、main だけに限る。
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      PACKAGE_ID: gmo-coin-api-client
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - uses: baptiste0928/cargo-install@8195d4f734a149db85385bb4102b42efcd373759 # v3
+        with:
+          crate: cargo-edit
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        with:
+          python-version: '3.15'
+      - id: defines
+        run: |
+          set -euo pipefail
+          LATEST_TAG=$(git describe --abbrev=0 --tags 2>/dev/null || true)
+          echo "LATEST_TAG=$LATEST_TAG"
+          echo "package_id=$PACKAGE_ID" >> "$GITHUB_OUTPUT"
+          echo "prev_tag=$LATEST_TAG" >> "$GITHUB_OUTPUT"
+      - name: Refuse to run before the first hand-made tag
+        if: steps.defines.outputs.prev_tag == ''
+        run: |
+          echo "::error::no v* tag exists yet. The first release is tagged by hand: push v0.1.0 on the current main, then run this workflow for later releases."
+          exit 1
+      - name: Refuse a non-major bump while the version is a pre-release
+        if: inputs.version == ''
+        env:
+          REQUESTED_LEVEL: ${{ inputs.level }}
+        run: |
+          CURRENT_VERSION=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
+          echo "CURRENT_VERSION=$CURRENT_VERSION"
+          if [[ "$CURRENT_VERSION" == *-* && "$REQUESTED_LEVEL" != "major" ]]; then
+            echo "::error::Cargo.toml has the pre-release version $CURRENT_VERSION; only level=major may bump it (requested: $REQUESTED_LEVEL)"
+            exit 1
+          fi
+      - run: pip install semver
+      - name: Validate the requested version
+        id: requested_version
+        if: inputs.version != ''
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          set -o pipefail
+          VERSION=$(git tag -l 'v*' | sort -V | python3 "${GITHUB_WORKSPACE}"/.github/validate-version.py "$REQUESTED_VERSION")
+          echo "VERSION=$VERSION"
+          echo "value=$VERSION" >> "$GITHUB_OUTPUT"
+      - name: Calculate changes from the latest tag to HEAD
+        id: changes
+        run: |
+          COUNT=$(git log ${{ steps.defines.outputs.prev_tag }}..HEAD --pretty=format:"%s" \
+            --no-merges -P --grep='^(BREAKING CHANGE|BREAKING-CHANGE|build|ci|feat|fix|docs|style|refactor|perf|test|revert|chore)(\(.*\))?!?:' \
+            | awk 'END{print NR}')
+          echo "COUNT=$COUNT"
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+      - name: Calculate semver level
+        id: semver_level
+        env:
+          REQUESTED_LEVEL: ${{ inputs.level }}
+        run: |
+          if [[ "$REQUESTED_LEVEL" != "auto" ]]; then
+            echo "value=$REQUESTED_LEVEL" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          SEMVER_LEVEL=$(git log ${{ steps.defines.outputs.prev_tag }}..HEAD --pretty=format:"%s%x1f%b%x1e" \
+            --no-merges -P --grep='^(BREAKING CHANGE|BREAKING-CHANGE|build|ci|feat|fix|docs|style|refactor|perf|test|revert|chore)(\(.*\))?!?:' \
+            | python3 "${GITHUB_WORKSPACE}"/.github/semver-level.py)
+          echo "SEMVER_LEVEL=$SEMVER_LEVEL"
+          echo "value=$SEMVER_LEVEL" >> "$GITHUB_OUTPUT"
+        if: inputs.version == '' && (steps.changes.outputs.count > 0 || inputs.level != 'auto')
+      - name: Get the next version
+        id: versions
+        env:
+          REQUESTED_VERSION: ${{ steps.requested_version.outputs.value }}
+        run: |
+          if [[ -n "$REQUESTED_VERSION" ]]; then
+            NEXT_VERSION="$REQUESTED_VERSION"
+          else
+            NEXT_VERSION=$(echo ${{ steps.defines.outputs.prev_tag }} | python3 "${GITHUB_WORKSPACE}"/.github/next-semver.py ${{ steps.semver_level.outputs.value }})
+          fi
+          echo "NEXT_VERSION=$NEXT_VERSION"
+          echo "next_version=$NEXT_VERSION" >> "$GITHUB_OUTPUT"
+          echo "next_tag=v$NEXT_VERSION" >> "$GITHUB_OUTPUT"
+      - name: bump version
+        run: |
+          cargo set-version -p ${{ steps.defines.outputs.package_id }} ${{ steps.versions.outputs.next_version }}
+      - name: Open a release pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEXT_TAG: ${{ steps.versions.outputs.next_tag }}
+          PREV_TAG: ${{ steps.defines.outputs.prev_tag }}
+        run: |
+          set -euo pipefail
+          BRANCH="chore/release-$NEXT_TAG"
+          git config --global user.email "j5ik2o@gmail.com"
+          git config --global user.name "Junichi Kato"
+          git switch -c "$BRANCH"
+          git add Cargo.toml Cargo.lock
+          git commit -m "chore: release $NEXT_TAG"
+          git push origin "$BRANCH"
+          python3 "${GITHUB_WORKSPACE}"/.github/create-release-note-header.py \
+            ${{ github.server_url }} \
+            ${{ github.repository }} \
+            "$PREV_TAG" \
+            "$NEXT_TAG" \
+            > release-notes.md
+          git log "$PREV_TAG"..HEAD --no-merges --format='%H%x1f%s%x1f%b%x1e' \
+            | python3 "${GITHUB_WORKSPACE}"/.github/create-release-note-body.py "${{ github.server_url }}" "${{ github.repository }}" >> release-notes.md
+          gh pr create \
+            --base main \
+            --head "$BRANCH" \
+            --title "chore: release $NEXT_TAG" \
+            --body-file release-notes.md
