@@ -41,7 +41,7 @@ Actions の画面で `lib-bump-version` を選び、`Run workflow` を押しま�
 
 ### 2. 人が PR を開く
 
-コマンドで開く場合は、実行のアーティファクトをダウンロードしてから PR を開きます。
+コマンドで開く場合は、実行のアーティファクトをダウンロードしてから PR を開きます。実行の Summary には、実行の ID を埋めたこのコマンドが出ます。そのまま使って構いません。
 
 ```sh
 gh run download <実行の ID> -n release-notes -D release-notes-dir

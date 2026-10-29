@@ -113,8 +113,10 @@ jobs:
           echo "next_version=$NEXT_VERSION" >> "$GITHUB_OUTPUT"
           echo "next_tag=v$NEXT_VERSION" >> "$GITHUB_OUTPUT"
       - name: bump version
+        env:
+          NEXT_VERSION: ${{ steps.versions.outputs.next_version }}
         run: |
-          cargo set-version -p ${{ steps.defines.outputs.package_id }} ${{ steps.versions.outputs.next_version }}
+          cargo set-version -p "$PACKAGE_ID" "$NEXT_VERSION"
       - name: Push the release branch
         env:
           NEXT_TAG: ${{ steps.versions.outputs.next_tag }}
@@ -154,7 +156,7 @@ jobs:
           コマンドで開く場合（この実行のアーティファクト \`release-notes\` をダウンロードしておく）:
 
           \`\`\`sh
-          gh run download <この実行の ID> -n release-notes -D release-notes-dir
+          gh run download ${GITHUB_RUN_ID} -n release-notes -D release-notes-dir
           gh pr create --base main --head chore/release-$NEXT_TAG \\
             --title "chore: release $NEXT_TAG" \\
             --body-file release-notes-dir/release-notes.md
