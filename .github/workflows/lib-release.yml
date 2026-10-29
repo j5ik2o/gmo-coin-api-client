@@ -9,6 +9,7 @@ env:
 jobs:
   release:
     runs-on: ubuntu-latest
+    environment: crates-io
     permissions:
       contents: read
       id-token: write
@@ -20,7 +21,7 @@ jobs:
           token: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: nightly
+          toolchain: stable
       - name: Check the tag against the crate version
         run: |
           set -euo pipefail

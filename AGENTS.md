@@ -75,4 +75,6 @@ cargo deny check advisories licenses
 
 `Cargo.toml` の `publish = false` は、加藤さんの公開承認があるまで外さない。この設定がある間は `lib-release` ワークフローの `cargo publish` は失敗する。
 
+公開は加藤さんが GitHub の Environment (`crates-io`) で承認する。`lib-bump-version` と `lib-release` のジョブにこの Environment を付けてあり、Environment に必須レビュアーを設定すると、承認が済むまでジョブは実行を始めない。
+
 最初のリリースは `v*` タグがまだないため、`lib-bump-version` ワークフローに `version` を明示して実行する。`version` はそのときの `Cargo.toml` の版と同じ値にする。`Cargo.toml` の版が変わらないので、版を上げるコミットは作らず、タグだけを打つ。2 回目からは `level` の自動判定を使える。

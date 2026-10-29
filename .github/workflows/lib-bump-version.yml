@@ -20,6 +20,7 @@ on:
 jobs:
   bump-version:
     runs-on: ubuntu-latest
+    environment: crates-io
     env:
       PACKAGE_ID: gmo-coin-api-client
     steps:

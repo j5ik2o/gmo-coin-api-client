@@ -3,18 +3,7 @@
   "extends": ["config:recommended"],
   "labels": ["renovate"],
   "commitMessagePrefix": "chore(deps):",
-  "platformAutomerge": true,
   "minimumReleaseAge": "3 days",
-  "packageRules": [
-    {
-      "matchUpdateTypes": ["minor", "patch", "pin", "digest"],
-      "automerge": true
-    },
-    {
-      "matchDepTypes": ["devDependencies"],
-      "automerge": true
-    }
-  ],
   "prHourlyLimit": 0,
   "prConcurrentLimit": 5
 }
