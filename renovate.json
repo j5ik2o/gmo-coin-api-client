@@ -4,6 +4,14 @@
   "labels": ["renovate"],
   "commitMessagePrefix": "chore(deps):",
   "minimumReleaseAge": "3 days",
+  "packageRules": [
+    {
+      "description": "Cargo は開発依存を dev-dependencies として報告する（devDependencies ではない）。自動マージは戻すまで切っておく。",
+      "matchManagers": ["cargo"],
+      "matchDepTypes": ["dev-dependencies"],
+      "automerge": false
+    }
+  ],
   "prHourlyLimit": 0,
   "prConcurrentLimit": 5
 }
