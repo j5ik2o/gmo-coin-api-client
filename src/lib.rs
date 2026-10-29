@@ -54,6 +54,8 @@ mod endpoint;
 pub mod error;
 pub mod rest;
 mod secret;
+#[cfg(test)]
+mod tls_path;
 mod transport;
 pub mod ws;
 

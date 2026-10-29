@@ -4,9 +4,9 @@
 //! hyper、WebSocket は tokio-tungstenite、TLS は rustls (ring プロバイダ、
 //! webpki-roots のルート証明書)。このモジュールが自前で持つのは、接続の
 //! 作り方 (ループバック限定の平文、それ以外は TLS)、ルートごとの有界な
-//! アイドル接続プール、`Limits` に基づくサイズ上限、そしてライブラリの
-//! エラーを「種類だけ」のエラーへ写す変換である。hyper、http、rustls、
-//! tungstenite の型は公開シグネチャに一切現れない。
+//! アイドル接続プールと同時実行の上限、`Limits` に基づくサイズ上限、そして
+//! ライブラリのエラーを「種類だけ」のエラーへ写す変換である。hyper、http、
+//! rustls、tungstenite の型は公開シグネチャに一切現れない。
 //!
 //! # 残存リスク
 //! `API-KEY` と `API-SIGN` ヘッダは hyper の `HeaderMap` に、`ws-auth` の
@@ -32,6 +32,8 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
+#[cfg(test)]
+use tokio_rustls::rustls::pki_types::CertificateDer;
 use tokio_rustls::rustls::{ClientConfig, RootCertStore};
 
 use crate::client::Timeouts;
@@ -50,14 +52,37 @@ impl Connector {
     ///
     /// # パニック
     /// ring プロバイダが TLS 1.2/1.3 を提供しない場合。ring では起きない。
+    pub(crate) fn new() -> Self {
+        let mut roots = RootCertStore::empty();
+        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        Self::with_roots(roots)
+    }
+
+    /// テスト専用: webpki のルートに加えて、`der` のサーバ証明書を信頼する。
+    /// `tests/fixtures/tls/` の自己署名証明書だけに使う。
+    ///
+    /// # パニック
+    /// `der` が証明書として読めない場合。フィクスチャはテストで検証済み。
+    #[cfg(test)]
+    pub(crate) fn trusting_also(der: &'static [u8]) -> Self {
+        let mut roots = RootCertStore::empty();
+        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        roots
+            .add(CertificateDer::from(der))
+            .expect("the TLS test fixture is a valid certificate");
+        Self::with_roots(roots)
+    }
+
+    /// ルート証明書の集合から rustls 設定を組み立てる。
+    ///
+    /// # パニック
+    /// ring プロバイダが TLS 1.2/1.3 を提供しない場合。ring では起きない。
     #[expect(
         clippy::expect_used,
         reason = "ring プロバイダは TLS 1.2 と 1.3 を提供するので、doc の # パニック は起きない"
     )]
-    pub(crate) fn new() -> Self {
+    fn with_roots(roots: RootCertStore) -> Self {
         let provider = Arc::new(tokio_rustls::rustls::crypto::ring::default_provider());
-        let mut roots = RootCertStore::empty();
-        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
         let mut config = ClientConfig::builder_with_provider(provider)
             .with_safe_default_protocol_versions()
             .expect("the ring provider supports TLS 1.2 and 1.3")

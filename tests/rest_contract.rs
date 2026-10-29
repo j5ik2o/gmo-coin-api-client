@@ -12,6 +12,7 @@
 
 mod support;
 
+use std::num::NonZeroU8;
 use std::time::Duration;
 
 use gmo_coin_api_client::error::{
@@ -118,6 +119,37 @@ async fn pooled_connections_are_reused_across_calls() {
         mock.http_connections(),
         1,
         "three sequential calls share one pooled connection"
+    );
+    mock.assert_done();
+}
+
+/// 応答を遅らせて 16 件を確実に重ねる。同時に処理するリクエストを 4 件に
+/// 絞っているので、開く接続も 4 本を超えず、残りの 12 件はその接続を再利用する。
+#[tokio::test]
+async fn concurrent_calls_open_at_most_the_inflight_limit_in_connections() {
+    let mock = MockExchange::start().await;
+    mock.on("GET", "/public/v1/status")
+        .times(16)
+        .reply(Reply::Delay(
+            Duration::from_millis(50),
+            Box::new(Reply::Fixture("public_get_status.json")),
+        ));
+    let mut config = Config::default();
+    config.limits.max_inflight_requests = NonZeroU8::new(4).unwrap();
+    let client = mock.client_with(config);
+
+    let answers = futures_util::future::join_all((0..16).map(|_| client.status())).await;
+
+    assert!(answers.iter().all(Result::is_ok), "every call is answered");
+    assert_eq!(
+        mock.peak_http_connections(),
+        4,
+        "only the permitted requests have connections open at once"
+    );
+    assert_eq!(
+        mock.http_connections(),
+        4,
+        "the calls that waited reuse the four pooled connections"
     );
     mock.assert_done();
 }
