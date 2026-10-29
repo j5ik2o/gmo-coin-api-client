@@ -304,6 +304,43 @@ async fn an_error_without_responsetime_still_decodes() {
 }
 
 #[tokio::test]
+async fn a_changed_responsetime_format_keeps_success_data_and_error_codes() {
+    let mock = MockExchange::start().await;
+    mock.on("GET", "/public/v1/status").reply(Reply::Json(
+        r#"{"status":0,"data":{"status":"OPEN"},"responsetime":"2026/10/27 11:49:18"}"#.to_owned(),
+    ));
+    mock.on("GET", "/public/v1/klines").reply(Reply::Json(
+        r#"{"status":1,"messages":[{"message_code":"ERR-5207","message_string":"Not found"}],"responsetime":1750000000}"#
+            .to_owned(),
+    ));
+
+    assert_eq!(
+        mock.client()
+            .status()
+            .await
+            .expect("a changed responsetime must not hide the success data"),
+        ExchangeStatus::Open
+    );
+
+    let span = KlineSpan::Year {
+        interval: LongInterval::Day1,
+        year: 2026,
+    };
+    match mock
+        .client()
+        .klines(Symbol::BTC, span)
+        .await
+        .expect_err("ERR-5207")
+    {
+        Error::Api(api) => {
+            assert_eq!(api.messages()[0].code.0, 5207);
+            assert_eq!(api.response_time(), None);
+        }
+        other => panic!("a changed responsetime must not hide the error code: {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn a_ticker_for_another_symbol_fails_the_postcondition() {
     let mock = MockExchange::start().await;
     mock.on("GET", "/public/v1/ticker")
