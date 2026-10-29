@@ -10,11 +10,11 @@
 
 ### なぜこの方法にしたか
 
-CI の起こし方を決めるには、まず「版上げの PR を誰が開くか」を決める必要があります。GitHub は、リポジトリの `GITHUB_TOKEN` が起こしたイベントでは新しいワークフローを起動しません。例外は `workflow_dispatch` と `repository_dispatch` だけです（[Triggering a workflow](https://docs.github.com/en/actions/how-tos/writing-workflows/choosing-when-your-workflow-runs/triggering-a-workflow)）。つまり `GITHUB_TOKEN` で PR を開くと、その PR では CI は実行されません。どの方法を選ぶにしても、PR を開く人を変えるか、人が別の操作で CI を起こすかのどちらかになります。
+CI の起こし方を決めるには、まず「版上げの PR を誰が開くか」を決める必要があります。GitHub は、リポジトリの `GITHUB_TOKEN` が起こしたイベントでは新しいワークフローを起動しません。`workflow_dispatch` と `repository_dispatch` は例外です。また、`pull_request` の `opened`・`synchronize`・`reopened` では、実行が承認待ちの状態で作られ、書き込み権限を持つ人が承認すると始まります（[Triggering a workflow](https://docs.github.com/en/actions/how-tos/writing-workflows/choosing-when-your-workflow-runs/triggering-a-workflow)）。つまり、`GITHUB_TOKEN` で PR を開いた場合は、CI を始めるのに人の承認が要ります。どの方法を選ぶにしても、PR を開く人を変えるか、人が承認や別の操作で CI を起こすかのどちらかになります。
 
-もう 1 つ制約があります。いまリポジトリ設定「Allow GitHub Actions to create and approve pull requests」は無効です。この設定が無効の間は、`GITHUB_TOKEN` は PR を作れません。`lib-bump-version` が `gh pr create` を呼んでも失敗します。したがって、PR を閉じて開き直す方法と `workflow_dispatch` で CI を起こす方法は、この設定を有効にすることを前提にしています。
+もう 1 つ制約があります。いまリポジトリ設定「Allow GitHub Actions to create and approve pull requests」は無効です。この設定が無効の間は、`GITHUB_TOKEN` は PR を作れません。`lib-bump-version` が `gh pr create` を呼んでも失敗します。そのため、Actions に PR を作らせて人が承認する方法、`workflow_dispatch` で CI を起こす方法、空のコミットを追加する方法は、どれもこの設定の有効化が前提になります。
 
-タグの push と公開の承認は、もともと加藤さんが行います。版上げには人の操作が入るので、PR を開くのも人に任せます。長く残る秘密情報やリポジトリ設定を増やさずに済む方法として、人に PR を開いてもらいます。人が開いた PR は、ほかの PR と同じように CI が実行されます。
+タグの push と公開の承認は、もともと加藤さんが行います。版上げには人の操作が入るので、PR を開くのも人に任せます。人が開いた PR なら、承認を待たずに CI がそのまま実行されます。長く残る秘密情報やリポジトリ設定を増やさずに済む方法として、この形にしました。
 
 ### 比べた方法
 
@@ -22,7 +22,7 @@ CI の起こし方を決めるには、まず「版上げの PR を誰が開く�
 |---|---|---|---|---|
 | 人が PR を開く | なし | なし | PR を開く（本文は実行のアーティファクトから使える） | 採用 |
 | GitHub App のトークンで PR を開く | App の登録とインストール | App の秘密鍵 | なし | 自動化したくなったら検討 |
-| Actions に PR を作らせ、人が閉じて開き直す | 「Allow GitHub Actions to create and approve pull requests」を有効にする | なし | 閉じて開き直す | 不採用 |
+| Actions に PR を作らせ、人が承認する | 「Allow GitHub Actions to create and approve pull requests」を有効にする | なし | 承認を押す | 不採用 |
 | `workflow_dispatch` で CI を起こす | 上の設定を有効にする（PR を作るため） | なし | 実行を押す | 不採用 |
 | 人が空のコミットを追加する | 上の設定を有効にする（PR を作るため） | なし | 空のコミットを追加する | 不採用 |
 
@@ -70,7 +70,7 @@ CI が実行されなかったときは、PR を閉じて開き直します。�
 
 ### 5. タグを push して公開する
 
-加藤さんが main に `vX.Y.Z` タグを push します。`lib-release` はそのタグの push で起動し、Environment `crates-io` の承認を待ってから `cargo publish` を実行します。
+加藤さんが main に `vX.Y.Z` タグを push します。タグを push する前に、`Cargo.toml` に `publish = false` がないことを確かめます。この設定があると `cargo publish` は失敗します。`lib-release` はそのタグの push で起動し、Environment `crates-io` の承認を待ってから `cargo publish` を実行します。
 
 ## 「Allow GitHub Actions to create and approve pull requests」の扱い
 

@@ -129,11 +129,11 @@ jobs:
           git add Cargo.toml Cargo.lock
           git commit -m "chore: release $NEXT_TAG"
           git push origin "$BRANCH"
-      # 版上げの PR は人が開く。GITHUB_TOKEN で起こしたイベントでは CI が走らず
-      # （workflow_dispatch と repository_dispatch を除く）、設定
-      # 「Allow GitHub Actions to create and approve pull requests」も無効のため、
-      # このワークフローからは PR を作れない。人が開いた PR では pull_request の
-      # opened が起こり、CI が普通に実行される。詳しくは docs/release.md を参照する。
+      # 版上げの PR は人が開く。いまは設定「Allow GitHub Actions to create and
+      # approve pull requests」が無効なので、このワークフローからは PR を作れない。
+      # GITHUB_TOKEN で PR を開いた場合も、CI は承認待ちで作られ、人の承認が要る。
+      # 人が開いた PR なら pull_request の opened で CI がそのまま実行される。
+      # 詳しくは docs/release.md を参照する。
       - name: Write the release notes and the next step
         env:
           NEXT_TAG: ${{ steps.versions.outputs.next_tag }}
