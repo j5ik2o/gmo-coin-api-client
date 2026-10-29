@@ -528,16 +528,19 @@ impl<C: FeedChannel> Session<C> {
                 if let Auth::Private { lease, .. } = &mut self.auth {
                     *lease = None;
                 }
-                Some(Ok(self.disconnected(DisconnectReason::HandshakeRejected {
-                    http_status,
-                })))
+                Some(Ok(self
+                    .disconnected(DisconnectReason::HandshakeRejected { http_status })
+                    .1))
             }
-            Err(DialFailure::Retry(reason)) => Some(Ok(self.disconnected(reason))),
+            Err(DialFailure::Retry(reason)) => Some(Ok(self.disconnected(reason).1)),
         }
     }
 
     /// `Waiting` に移り、`Disconnected` を作る。進行中の延長は捨てる。
-    fn disconnected(&mut self, reason: DisconnectReason) -> <C as Codec>::Event {
+    /// 返す段数は、この遷移で使ったバックオフの梯子の段数である。セッションが
+    /// 次に使う上限 (`Backoff::cap`) をテストが確かめられるようにするため、
+    /// 使った段数をそのまま返す。
+    fn disconnected(&mut self, reason: DisconnectReason) -> (u32, <C as Codec>::Event) {
         let step = backoff_step(self.attempt, &reason);
         let delay = self.inner.config.reconnect.delay(step);
         self.attempt = self.attempt.saturating_add(1);
@@ -545,10 +548,11 @@ impl<C: FeedChannel> Session<C> {
             until: Instant::now() + delay,
         };
         self.auth.abandon_extend();
-        C::disconnected(Disconnect {
+        let event = C::disconnected(Disconnect {
             reason,
             retry_in: delay,
-        })
+        });
+        (step, event)
     }
 
     /// 生きていた接続を捨てる。バックオフの最上段 (`Backoff` の `max`。
@@ -560,7 +564,7 @@ impl<C: FeedChannel> Session<C> {
         {
             self.attempt = 0;
         }
-        self.disconnected(reason)
+        self.disconnected(reason).1
     }
 
     /// `Connected` での 1 歩。`None` なら何も返すものがなく、ループを続ける。
@@ -1085,22 +1089,30 @@ mod tests {
         );
     }
 
-    /// ERR-5003 の経路では、セッションが次に使う段数は 2 段先で、その cap は
-    /// 結合テスト (`tests/ws_feed.rs` の `fast_client`) の設定 (20 ms..80 ms) で
-    /// ちょうど 80 ms になる。段数が 1 でも 3 でも、乱数に関係なくここで落ちる。
-    ///
-    /// 段数そのものも確かめるのは、この設定では 2 段目以降が `max` に飽和し、
-    /// cap だけでは 2 段と 3 段を区別できないからである。
+    /// ERR-5003 の失敗をセッションに実際に渡し、`disconnected` の処理を通した
+    /// あと、その遷移が使った梯子の段数の cap がちょうど 80 ms であることを
+    /// 確かめる。2 段目が `max` に飽和しない設定 (20 ms..320 ms) では、1 段なら
+    /// 40 ms、2 段なら 80 ms、3 段なら 160 ms になる。乱数を引かずに段数の cap
+    /// を比べるので、1 段・3 段のどちらの誤りも乱数に関係なく毎回見つかる。
     #[test]
-    fn a_rate_limit_uses_the_second_rung_whose_cap_is_eighty_milliseconds() {
-        use crate::client::Timeout;
+    fn a_rate_limit_moves_the_session_two_rungs_down_to_an_eighty_millisecond_cap() {
+        use crate::client::{Anonymous, Config, Timeout};
+        use crate::endpoint::Endpoints;
+        use crate::transport::Connector;
 
-        let step = backoff_step(0, &rate_limited_reason());
-        assert_eq!(step, 2, "ERR-5003 starts two rungs down the ladder");
         let ms = |n| Timeout::new(Duration::from_millis(n)).unwrap();
-        let backoff = Backoff::new(ms(20), ms(80)).unwrap();
+        let config = Config {
+            reconnect: Backoff::new(ms(20), ms(320)).unwrap(),
+            ..Config::default()
+        };
+        let client =
+            Client::<Anonymous>::with_connector(Endpoints::production(), config, Connector::new());
+        let mut session = Session::<PublicChannel>::public(Arc::clone(&client.inner));
+
+        let (step, _event) = session.disconnected(rate_limited_reason());
+        assert_eq!(step, 2, "ERR-5003 starts two rungs down the ladder");
         assert_eq!(
-            backoff.cap(step),
+            session.inner.config.reconnect.cap(step),
             Duration::from_millis(80),
             "the cap of the rung the session will use next"
         );
