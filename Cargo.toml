@@ -8,7 +8,7 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
-tokio = { version = "1.54", default-features = false, features = ["net", "time", "io-util", "macros", "rt"] }
+tokio = { version = "1.54", default-features = false, features = ["net", "time", "io-util", "macros", "rt", "sync"] }
 hyper = { version = "1.12", default-features = false, features = ["client", "http1"] }
 hyper-util = { version = "0.1.21", default-features = false, features = ["tokio"] }
 http-body-util = "0.1.5"

@@ -66,6 +66,10 @@ struct State {
     ws: ws::Hub,
     /// hyper に渡した TCP 接続の数。接続プールの検証に使う。
     http_connections: usize,
+    /// 今開いている HTTP 接続の数。
+    http_open: usize,
+    /// 同時に開いていた HTTP 接続の最大数。
+    http_peak: usize,
 }
 
 struct Route {
@@ -273,6 +277,11 @@ impl MockExchange {
         self.lock().http_connections
     }
 
+    /// 同時に開いていた HTTP 接続の最大数 (WebSocket は含まない)。
+    pub(crate) fn peak_http_connections(&self) -> usize {
+        self.lock().http_peak
+    }
+
     pub(crate) fn ws(&self) -> WsControl {
         WsControl::new(Arc::clone(&self.state))
     }
@@ -363,11 +372,19 @@ async fn serve(socket: tokio::net::TcpStream, state: Arc<Mutex<State>>) {
     if text.contains("upgrade: websocket") {
         ws::serve(socket, state).await;
     } else {
-        state
+        {
+            let mut st = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            st.http_connections += 1;
+            st.http_open += 1;
+            st.http_peak = st.http_peak.max(st.http_open);
+        }
+        http::serve(socket, Arc::clone(&state)).await;
+        let mut st = state
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .http_connections += 1;
-        http::serve(socket, state).await;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        st.http_open -= 1;
     }
 }
 
