@@ -25,16 +25,25 @@
 //!   (issue #14)。窓が閉じるまで (期限を過ぎた後は `REJECTION_DRAIN_LIMIT`
 //!   フレームまで) 読み、それでもソケットが空にならない (受信が途切れない)
 //!   ときは、帰属をあきらめて書く。書き込みが永久に止まらないようにするため
-//!   である。あきらめている間は書き込みを止めず、拒否はどのコマンドにも
-//!   結び付けない (`Rejected { channel: None }`)。あきらめている間に書いた
-//!   コマンドも `last` に残す。
+//!   である。あきらめている間も、窓の期限が来るたびにソケットを一度だけ
+//!   読んでから書く。読まずに書くと、書き込みが窓を開き直し、あきらめた
+//!   状態が続く (issue #23)。読んだ拒否はどのコマンドにも結び付けない
+//!   (`Rejected { channel: None }`)。拒否されたのが最後に書いた subscribe で、
+//!   そのチャネルがまだ望まれているなら、書き直しの対象にして差分に書かせる。
+//!   書き直しはチャネルごとに 1 回までで、それも匿名の拒否で返ってきたら自動の
+//!   書き直しだけをやめる (無効なチャネルを送り続けない)。望ましい集合も
+//!   送った集合も変えないので、差分は unsubscribe も書かない。望みは残るので、
+//!   再接続はそのチャネルを送り直す。あきらめている間に書いたコマンドも
+//!   `last` に残す。
 //! - `sent.last` が残るのは、その書き込みから `REJECTION_WINDOW` を過ぎた後に、
 //!   ソケットに未読のフレームがないことを `next` がまだ観測していない間だけ
-//!   である。あきらめている場合は、空を観測しただけでは消さない。空の観測と、
-//!   `last` (あきらめている間に書いた最後のコマンド) の窓の期限が揃って初めて
-//!   帰属を再開する。揃うまでに届いた拒否は `None` のままにする。
+//!   である。期限を過ぎれば、コマンドが待っていても窓ごとに一度は読むので、
+//!   空ならその時点で窓が閉じる。あきらめている場合は、空を観測しただけでは
+//!   消さない。空の観測と、`last` (あきらめている間に書いた最後のコマンド) の
+//!   窓の期限が揃って初めて帰属を再開する。揃うまでに届いた拒否は `None` の
+//!   ままにする。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::{Future, poll_fn};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -159,6 +168,29 @@ struct Sent<C: FeedChannel> {
     /// 期限も過ぎたときである。それまでは、遅れて届いた拒否がどのコマンドの
     /// ものか決められない。
     attribution_abandoned: bool,
+    /// `last` の窓の期限を過ぎてから、この窓のためにソケットを一度読んだ。
+    /// あきらめている間は、これが立つまで次のコマンドを書かない。書いてしまうと
+    /// `last` が置き換わり、窓の期限が来る前に新しい窓が開いて、空のソケットを
+    /// 観測する機会がなくなる (issue #23)。読み込みが空を観測すれば
+    /// `Step::RejectionWindowClosed` が `last` ごとこれを消す。フレームを
+    /// 読んだ場合は、それを返した後のポーリングで書く。窓ごとの印が古く
+    /// ならないよう、書き込みのたびに false に戻す。
+    probed_deadline: bool,
+    /// 匿名の拒否で「書いたが取引所に通っていないかもしれない」subscribe。
+    /// `subscribed` からは外さない: 拒否が別のコマンドのものだった場合、その
+    /// 購読は取引所で生きているかもしれず、呼び出し側が `unsubscribe` を
+    /// 呼んだときに差分が unsubscribe を書ける必要がある。差分は、ここに
+    /// 入っているキーを `subscribed` に載っていても書き直す。
+    retries: BTreeSet<<C as Codec>::Key>,
+    /// 匿名の拒否による書き直しを使ったキー。書き直しはチャネルごとに 1 回まで
+    /// である。チャネル自体が無効 (ERR-5106 など) だと送り直すたびに拒否され、
+    /// 1.05 秒ごとに同じ subscribe を送り続けて、IP ごとのコマンド枠を使い切る。
+    /// 2 度目の匿名の拒否では自動の書き直しだけをやめる。望ましい集合も送った
+    /// 集合も変えないので、差分は unsubscribe も書かない。望みは残るので、
+    /// 再接続はそのチャネルを送り直す。印は帰属が戻ったとき
+    /// (`Step::RejectionWindowClosed`) と、呼び出し側が `subscribe` を呼び直した
+    /// とき (`Session::desire`) に消す。新しい接続では `empty` で空から始まる。
+    retried: BTreeSet<<C as Codec>::Key>,
 }
 
 impl<C: FeedChannel> Sent<C> {
@@ -168,6 +200,18 @@ impl<C: FeedChannel> Sent<C> {
             last: None,
             read_after_deadline: 0,
             attribution_abandoned: false,
+            probed_deadline: false,
+            retries: BTreeSet::new(),
+            retried: BTreeSet::new(),
+        }
+    }
+
+    /// 呼び出し側が `key` を購読し直した。匿名の拒否による書き直しの印を消し、
+    /// 書き直しの対象になっているチャネルなら、もう一度だけ書けるようにする。
+    /// 明示的な購読は、自動の書き直しの 1 回に数えない。
+    fn resubscribed(&mut self, key: &<C as Codec>::Key) {
+        if self.retried.remove(key) {
+            self.retries.insert(key.clone());
         }
     }
 
@@ -193,6 +237,7 @@ impl<C: FeedChannel> Sent<C> {
         {
             self.last = None;
             self.read_after_deadline = 0;
+            self.probed_deadline = false;
         }
     }
 
@@ -204,14 +249,23 @@ impl<C: FeedChannel> Sent<C> {
     /// ソケットが空だと観測したときの `Step::RejectionWindowClosed` だけである。
     ///
     /// 帰属をあきらめている間 (`attribution_abandoned`) は、未読の拒否がどの
-    /// コマンドのものか決められないので、何も変えずに `None` を返す。`last`
-    /// は帰属を再開してよいかの窓の起点として残す。
+    /// コマンドのものか決められないので、`None` を返す。`last` は帰属を再開して
+    /// よいかの窓の起点として残す。最後に書いた subscribe のチャネルをまだ
+    /// 望んでいるなら、送った集合は残したまま書き直しの対象にし、差分に 1 度
+    /// だけ書き直させる。拒否がその subscribe のものなら購読が黙って欠けず、
+    /// 別のコマンドの拒否だった場合も、重複した subscribe は取引所で置き換えに
+    /// なるだけである。同じチャネルが 2 度目の匿名の拒否で返ってきたら、自動の
+    /// 書き直しだけをやめる (`retried`)。望ましい集合も送った集合も変えない
+    /// ので、差分は unsubscribe も書かない。望み直していないチャネルは、
+    /// 送るべき unsubscribe を失わないよう、そのまま残す。
     fn rejected(&mut self, desired: &mut BTreeMap<<C as Codec>::Key, C>) -> Option<C> {
         if self.attribution_abandoned {
+            self.reject_anonymously(desired);
             return None;
         }
         let (_, command) = self.last.take()?;
         self.read_after_deadline = 0;
+        self.probed_deadline = false;
         match command {
             Written::Subscribe { channel, .. } => {
                 let key = channel.key();
@@ -222,6 +276,31 @@ impl<C: FeedChannel> Sent<C> {
                 Some(channel)
             }
             Written::Unsubscribe(channel) => Some(channel),
+        }
+    }
+
+    /// 帰属をあきらめている間に読んだ、どのコマンドのものか決められない拒否。
+    /// 最後に書いた subscribe がまだ望まれていれば、書き直しの対象にして差分に
+    /// 1 度だけ書かせる。送った集合からは外さない (取引所で購読が生きている
+    /// 可能性があるため)。2 度目の匿名の拒否では自動の書き直しだけをやめる。
+    /// 望ましい集合も送った集合も変えないので、差分は unsubscribe も書かない。
+    /// 望みは残るので、再接続はそのチャネルを送り直す。望みを外すと、有効な
+    /// チャネルが呼び出し側に知らされないまま購読から消える。チャネル自体が
+    /// 無効なら、書き直しを続けず 1.05 秒ごとに同じコマンドを送り続けることも
+    /// ない。印は帰属が戻るか、呼び出し側が `subscribe` を呼び直すと消える。
+    fn reject_anonymously(&mut self, desired: &mut BTreeMap<<C as Codec>::Key, C>) {
+        let Some((_, Written::Subscribe { channel, .. })) = &self.last else {
+            return;
+        };
+        let key = channel.key();
+        if desired.get(&key) != Some(channel) {
+            return;
+        }
+        if self.retried.contains(&key) {
+            self.retries.remove(&key);
+        } else {
+            self.retried.insert(key.clone());
+            self.retries.insert(key);
         }
     }
 }
@@ -340,15 +419,17 @@ impl Connection {
     }
 }
 
-/// 望ましい集合と送った集合の最初の差: 足りない (または置き換えられた)
-/// subscribe が先、それがなければ余った unsubscribe。
+/// 望ましい集合と送った集合の最初の差: 足りない (または置き換えられた、
+/// または匿名の拒否で書き直す) subscribe が先、それがなければ余った
+/// unsubscribe。
 fn next_command<C: FeedChannel>(
     desired: &BTreeMap<<C as Codec>::Key, C>,
     sent: &BTreeMap<<C as Codec>::Key, C>,
+    retries: &BTreeSet<<C as Codec>::Key>,
 ) -> Option<(C, bool)> {
     desired
         .iter()
-        .find(|(key, channel)| sent.get(key) != Some(channel))
+        .find(|(key, channel)| retries.contains(key) || sent.get(key) != Some(channel))
         .map(|(_, channel)| (channel.clone(), true))
         .or_else(|| {
             sent.iter()
@@ -466,6 +547,11 @@ impl<C: FeedChannel> Session<C> {
         let key = channel.key();
         if !self.desired.contains_key(&key) && self.desired.len() >= usize::from(max) {
             return Err(ContractViolation::TooManySubscriptions { max });
+        }
+        // 呼び出し側の明示的な購読は、匿名の拒否による送り直しの 1 回に
+        // 数えない。呼び直されたら、また 1 度だけ送り直せる。
+        if let State::Connected(_, sent) = &mut self.state {
+            sent.resubscribed(&key);
         }
         self.desired.insert(key, channel);
         Ok(())
@@ -596,7 +682,7 @@ impl<C: FeedChannel> Session<C> {
         }
         let now = Instant::now();
 
-        let command = next_command::<C>(desired, &sent.subscribed);
+        let command = next_command::<C>(desired, &sent.subscribed, &sent.retries);
         let slot = command.as_ref().map(|_| pacer.next_free());
         let idle_at = conn.last_frame_at + timeouts.ws_idle.get();
         let write_deadline = conn
@@ -619,12 +705,20 @@ impl<C: FeedChannel> Session<C> {
             sent.attribution_abandoned = true;
             sent.read_after_deadline = 0;
         }
+        // 窓の期限が来たら、あきらめている間でも一度は読んでから書く。読まずに
+        // 書くと、書き込みが窓を開き直し、空のソケットを観測する機会が来ない
+        // まま帰属をあきらめた状態が続く (issue #23)。期限より前の読み込みは
+        // 窓を閉じない (`poll_socket` は `window_elapsed` のときだけ閉じる)。
+        let read_due = window_elapsed && !sent.probed_deadline;
+        let probed = window_elapsed && sent.probed_deadline;
         // 前のコマンドへの拒否を読む前に次を書くと、その拒否が後のコマンドに
         // 付いてしまう (issue #14)。`last` がある間は書かず、まず読む。
-        // あきらめている間だけは、書き込みを止めないためにそのまま書く。
-        let gated = sent.last.is_some() && !sent.attribution_abandoned;
+        // あきらめている間は、窓の期限が来るのを待ち、その窓のために一度読んだ
+        // 後だけ書き込みを許す。書き込みを止め続けないための逃げ道である。
+        let gated = sent.last.is_some() && (!sent.attribution_abandoned || !probed);
         let want_write = !gated && slot.is_some_and(|at| at <= now);
-        let draining = command.is_some() && gated;
+        // 期限の後に読んだフレームを数えるのは、あきらめる前だけである。
+        let draining = command.is_some() && sent.last.is_some() && !sent.attribution_abandoned;
 
         let step = tokio::select! {
             biased;
@@ -644,6 +738,12 @@ impl<C: FeedChannel> Session<C> {
         // 上限まで読んでソケットが空にならなければ、帰属をあきらめる。
         if matches!(step, Step::Message(_)) && draining && window_elapsed {
             sent.read_after_deadline = sent.read_after_deadline.saturating_add(1);
+        }
+        // あきらめている間に期限を過ぎて読み込んだフレームは、空でなかったと
+        // しても窓ごとの一度を済ませたことになる。次のポーリングは書いてよい。
+        // あきらめる前の読み込みは数えない: あきらめた時点から改めて一度読む。
+        if matches!(step, Step::Message(_)) && read_due && sent.attribution_abandoned {
+            sent.probed_deadline = true;
         }
 
         match step {
@@ -691,10 +791,12 @@ impl<C: FeedChannel> Session<C> {
                 }
                 let key = channel.key();
                 let written = if subscribe {
+                    sent.retries.remove(&key);
                     let replaced = sent.subscribed.insert(key, channel.clone()).is_some();
                     Written::Subscribe { channel, replaced }
                 } else {
                     sent.subscribed.remove(&key);
+                    sent.retries.remove(&key);
                     Written::Unsubscribe(channel)
                 };
                 // あきらめている間も、このコマンドを `last` に残す。`last` の
@@ -702,6 +804,7 @@ impl<C: FeedChannel> Session<C> {
                 // 拒否は再開までどのコマンドにも結び付かない。
                 sent.last = Some((Instant::now(), written));
                 sent.read_after_deadline = 0;
+                sent.probed_deadline = false;
                 conn.flush_since.get_or_insert_with(Instant::now);
                 None
             }
@@ -713,6 +816,8 @@ impl<C: FeedChannel> Session<C> {
                 sent.last = None;
                 sent.attribution_abandoned = false;
                 sent.read_after_deadline = 0;
+                sent.probed_deadline = false;
+                sent.retried.clear();
                 None
             }
             Step::Idle => Some(Ok(self.drop_connection(live_failure(
@@ -943,16 +1048,17 @@ mod tests {
     fn the_first_difference_is_a_missing_subscribe_then_a_stale_unsubscribe() {
         let mut desired = BTreeMap::new();
         let mut sent = BTreeMap::new();
-        assert!(next_command::<PublicChannel>(&desired, &sent).is_none());
+        let mut retries = BTreeSet::new();
+        assert!(next_command::<PublicChannel>(&desired, &sent, &retries).is_none());
 
         let ticker = PublicChannel::Ticker(Symbol::BTC);
         desired.insert(ticker.key(), ticker.clone());
         assert_eq!(
-            next_command::<PublicChannel>(&desired, &sent),
+            next_command::<PublicChannel>(&desired, &sent, &retries),
             Some((ticker.clone(), true))
         );
         sent.insert(ticker.key(), ticker.clone());
-        assert!(next_command::<PublicChannel>(&desired, &sent).is_none());
+        assert!(next_command::<PublicChannel>(&desired, &sent, &retries).is_none());
 
         let replaced = PublicChannel::Trades {
             symbol: Symbol::BTC,
@@ -967,23 +1073,35 @@ mod tests {
         );
         desired.insert(replaced.key(), replaced.clone());
         assert_eq!(
-            next_command::<PublicChannel>(&desired, &sent),
+            next_command::<PublicChannel>(&desired, &sent, &retries),
             Some((replaced.clone(), true)),
             "a changed option is re-sent as a subscribe"
         );
         sent.insert(replaced.key(), replaced);
 
+        retries.insert(ticker.key());
+        assert_eq!(
+            next_command::<PublicChannel>(&desired, &sent, &retries),
+            Some((ticker.clone(), true)),
+            "an anonymous rejection writes the subscribe again"
+        );
+        retries.remove(&ticker.key());
+
         desired.remove(&ticker.key());
         assert_eq!(
-            next_command::<PublicChannel>(&desired, &sent),
+            next_command::<PublicChannel>(&desired, &sent, &retries),
             Some((ticker, false))
         );
     }
 
     /// 帰属をあきらめている間は、未読の拒否が前のコマンドのものかもしれない。
-    /// 拒否はどのコマンドにも結び付かず、望ましい集合も変わらない。
+    /// 拒否はどのコマンドにも結び付かない。最後に書いた subscribe がまだ
+    /// 望まれているなら、書き直しの対象にして差分に 1 度だけ書かせる。購読が
+    /// 黙って欠けたまま残らないようにするためである (issue #23)。送った集合は
+    /// 残す: 呼び出し側が unsubscribe を呼んだときに、そのコマンドを書ける
+    /// 必要がある。
     #[test]
-    fn an_abandoned_attribution_names_no_channel_and_drops_nothing() {
+    fn an_abandoned_attribution_names_no_channel_and_schedules_one_rewrite() {
         let ticker = PublicChannel::Ticker(Symbol::ETH);
         let mut desired = BTreeMap::new();
         desired.insert(ticker.key(), ticker.clone());
@@ -1001,12 +1119,120 @@ mod tests {
         assert_eq!(sent.rejected(&mut desired), None);
         assert!(
             desired.contains_key(&ticker.key()),
-            "the rejected subscribe stayed in the desired set"
+            "the caller's intent stays, so the difference writes the subscribe again"
         );
-        assert!(sent.subscribed.contains_key(&ticker.key()));
+        assert!(
+            sent.subscribed.contains_key(&ticker.key()),
+            "the sent state stays, so a later unsubscribe can be written"
+        );
+        assert!(
+            sent.retries.contains(&ticker.key()),
+            "the difference rewrites this subscribe once"
+        );
         assert!(
             sent.last.is_some(),
             "the write time stays as the anchor for resuming attribution"
+        );
+    }
+
+    /// 同じチャネルが 2 度目の匿名の拒否で返ってきたら、自動の書き直しだけを
+    /// やめる。チャネル自体が無効なとき、1.05 秒ごとに同じコマンドを送り続けて
+    /// IP ごとの枠を使い切らないためである (issue #23 のレビュー指摘)。望ましい
+    /// 集合も送った集合も変えないので、差分は unsubscribe も書かない。望みは
+    /// 残るので、再接続で購読が戻る。
+    #[test]
+    fn a_second_anonymous_rejection_stops_rewriting_the_channel() {
+        let ticker = PublicChannel::Ticker(Symbol::ETH);
+        let mut desired = BTreeMap::new();
+        desired.insert(ticker.key(), ticker.clone());
+        let mut sent = Sent::<PublicChannel>::empty();
+        sent.subscribed.insert(ticker.key(), ticker.clone());
+        sent.last = Some((
+            Instant::now(),
+            Written::Subscribe {
+                channel: ticker.clone(),
+                replaced: false,
+            },
+        ));
+        sent.attribution_abandoned = true;
+
+        assert_eq!(sent.rejected(&mut desired), None);
+        assert!(
+            sent.retried.contains(&ticker.key()) && sent.retries.contains(&ticker.key()),
+            "the first anonymous rejection allows one rewrite"
+        );
+
+        // 差分が書き直した体で、同じ拒否がもう一度返る。
+        sent.retries.remove(&ticker.key());
+        assert_eq!(sent.rejected(&mut desired), None);
+        assert!(
+            desired.contains_key(&ticker.key()),
+            "an anonymous rejection must not change the desired set"
+        );
+        assert!(
+            sent.subscribed.contains_key(&ticker.key()) && !sent.retries.contains(&ticker.key()),
+            "the automatic rewrite stops and the sent state stays"
+        );
+        assert!(
+            next_command::<PublicChannel>(&desired, &sent.subscribed, &sent.retries).is_none(),
+            "the difference writes neither a subscribe nor an unsubscribe"
+        );
+    }
+
+    /// 呼び出し側が購読を呼び直したら、匿名の拒否による書き直しの印を消し、
+    /// そのチャネルをもう一度だけ書けるようにする。
+    #[test]
+    fn a_caller_subscribe_forgets_the_rewrite_and_schedules_another() {
+        let ticker = PublicChannel::Ticker(Symbol::ETH);
+        let mut sent = Sent::<PublicChannel>::empty();
+        sent.retried.insert(ticker.key());
+
+        sent.resubscribed(&ticker.key());
+
+        assert!(!sent.retried.contains(&ticker.key()));
+        assert!(
+            sent.retries.contains(&ticker.key()),
+            "an explicit subscribe writes the command again"
+        );
+    }
+
+    /// 匿名の拒否による書き直しの印が付いていないチャネルを購読し直しても、
+    /// 差分に余計なコマンドを足さない。二重の subscribe は何もしない。
+    #[test]
+    fn a_plain_repeat_subscribe_does_not_schedule_a_rewrite() {
+        let ticker = PublicChannel::Ticker(Symbol::ETH);
+        let mut sent = Sent::<PublicChannel>::empty();
+
+        sent.resubscribed(&ticker.key());
+
+        assert!(sent.retries.is_empty() && sent.retried.is_empty());
+    }
+
+    /// 望み直していないチャネルは、送った集合に残す。拒否がその subscribe の
+    /// ものだったとしても、送るべき unsubscribe を失わないためである。
+    #[test]
+    fn an_abandoned_attribution_keeps_a_channel_the_caller_no_longer_wants() {
+        let ticker = PublicChannel::Ticker(Symbol::ETH);
+        let mut desired = BTreeMap::new();
+        let mut sent = Sent::<PublicChannel>::empty();
+        sent.subscribed.insert(ticker.key(), ticker.clone());
+        sent.last = Some((
+            Instant::now(),
+            Written::Subscribe {
+                channel: ticker.clone(),
+                replaced: false,
+            },
+        ));
+        sent.attribution_abandoned = true;
+
+        assert_eq!(sent.rejected(&mut desired), None);
+        assert!(
+            sent.subscribed.contains_key(&ticker.key()),
+            "an unsubscribe still has to be written for a channel the caller dropped"
+        );
+        assert!(
+            sent.retries.is_empty() && sent.retried.is_empty(),
+            "a channel the caller no longer wants is not written again"
         );
     }
 

@@ -1334,6 +1334,390 @@ async fn attribution_resumes_after_the_abandoned_write_window_elapses() {
     feed.close().await.unwrap();
 }
 
+/// issue #23 の再現: 64 チャネル (購読数の上限) を一括で購読し、ペーサが
+/// 1.05 秒に 1 つ書く状況でも、取引所が拒否したコマンドが正しいチャネルに
+/// 帰属する。
+///
+/// 呼び出し側が離れている間に、窓の期限 (1.05 秒) を過ぎたフレームを
+/// `REJECTION_DRAIN_LIMIT` (64) 個積んでおく。戻ってから 64 チャネルを
+/// 一括で購読すると、フィードは 64 フレームを読んで帰属をあきらめる。修正前は、
+/// あきらめたまま次のコマンドを書いて窓を開き直すので、空のソケットを観測する
+/// 機会がなく、Q00 への拒否は `channel: None` になる。修正後は、窓の期限ごとに
+/// ソケットを一度読むので、空を観測した時点で帰属が戻り、拒否が Q00 に付く。
+#[tokio::test]
+async fn a_rejection_is_attributed_while_the_subscription_limit_is_queued() {
+    /// `REJECTION_DRAIN_LIMIT` と `Limits::max_subscriptions` の既定値。
+    const QUEUED: usize = 64;
+    let mock = MockExchange::start().await;
+    let ws = mock.ws();
+    let mut feed = mock.client().public_feed();
+    feed.subscribe(PublicChannel::Ticker(Symbol::ETH)).unwrap();
+    {
+        let mut next = std::pin::pin!(feed.next());
+        tokio::select! {
+            event = &mut next => panic!("no event before the subscribe: {event:?}"),
+            _ = ws.subscribed(Api::Public, "ticker", Some("ETH"), WAIT) => {}
+        }
+    }
+
+    // 呼び出し側は離れる。購読していない銘柄のデータを、窓の期限を過ぎてから
+    // 読む分だけ積んでおく。
+    let ticker = fixture("ws_public_ticker.json");
+    for _ in 0..QUEUED {
+        ws.push(Api::Public, &ticker);
+    }
+    tokio::time::sleep(Duration::from_millis(1300)).await;
+
+    // 購読数の上限まで一括で購読する。ETH は降りて枠を空ける。
+    assert!(feed.unsubscribe(&PublicChannel::Ticker(Symbol::ETH)));
+    let channels: Vec<_> = (0..QUEUED)
+        .map(|i| {
+            let symbol = Symbol::parse(&format!("Q{i:02}")).expect("uppercase and digits");
+            PublicChannel::Ticker(symbol)
+        })
+        .collect();
+    for channel in &channels {
+        feed.subscribe(channel.clone()).unwrap();
+    }
+    ws.reject_subscribe(
+        Api::Public,
+        "ticker",
+        "ERR-5106 Invalid request parameter. channel",
+    );
+
+    let event = tokio::time::timeout(WAIT, feed.next())
+        .await
+        .expect("the rejection never arrived")
+        .unwrap();
+    match event {
+        PublicEvent::Rejected { channel, text } => {
+            assert_eq!(
+                channel,
+                Some(channels[0].clone()),
+                "the rejection was not attributed to the first queued command"
+            );
+            assert_eq!(&*text, "ERR-5106 Invalid request parameter. channel");
+        }
+        other => panic!("{other:?}"),
+    }
+    feed.close().await.unwrap();
+}
+
+/// あきらめている間に届いた拒否は `channel: None` になるが、拒否された
+/// subscribe を購読済みとして残さない (issue #23)。同じチャネルをもう一度
+/// 購読すると、送り直される。修正前は送った集合に残るので、再購読しても
+/// コマンドが書かれず、購読が黙って欠ける。
+#[tokio::test]
+async fn a_subscribe_rejected_while_abandoned_is_sent_again() {
+    const BACKLOG: usize = 100;
+    let mock = MockExchange::start().await;
+    let ws = mock.ws();
+    let mut feed = mock.client().public_feed();
+    feed.subscribe(PublicChannel::Ticker(Symbol::ETH)).unwrap();
+    {
+        let mut next = std::pin::pin!(feed.next());
+        tokio::select! {
+            event = &mut next => panic!("no event before the subscribe: {event:?}"),
+            _ = ws.subscribed(Api::Public, "ticker", Some("ETH"), WAIT) => {}
+        }
+    }
+    let ticker = fixture("ws_public_ticker.json");
+    for _ in 0..BACKLOG {
+        ws.push(Api::Public, &ticker);
+    }
+    tokio::time::sleep(Duration::from_millis(1300)).await;
+
+    // XRP は帰属をあきらめた状態で書かれる。
+    let xrp_subscribes = |ws: &support::WsControl| {
+        ws.commands()
+            .iter()
+            .filter(|(_, _, c)| {
+                c["command"] == "subscribe" && c["channel"] == "ticker" && c["symbol"] == "XRP"
+            })
+            .count()
+    };
+    feed.subscribe(PublicChannel::Ticker(Symbol::XRP)).unwrap();
+    let deadline = Instant::now() + WAIT;
+    while xrp_subscribes(&ws) == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "the XRP subscribe was never written"
+        );
+        let _ = tokio::time::timeout(Duration::from_millis(20), feed.next()).await;
+    }
+
+    // あきらめている間に届いた拒否は、どのコマンドのものか決められない。
+    ws.push(Api::Public, &fixture("live/ws_public_error.json"));
+    match tokio::time::timeout(WAIT, feed.next())
+        .await
+        .expect("the rejection never arrived")
+        .unwrap()
+    {
+        PublicEvent::Rejected { channel, .. } => assert_eq!(channel, None),
+        other => panic!("{other:?}"),
+    }
+
+    // 拒否された購読は購読済みとして残らない。もう一度購読すると送り直す。
+    feed.subscribe(PublicChannel::Ticker(Symbol::XRP)).unwrap();
+    let deadline = Instant::now() + WAIT;
+    while xrp_subscribes(&ws) < 2 {
+        assert!(
+            Instant::now() < deadline,
+            "the rejected subscribe was never sent again"
+        );
+        let _ = tokio::time::timeout(Duration::from_millis(20), feed.next()).await;
+    }
+    feed.close().await.unwrap();
+}
+
+/// あきらめている間に拒否された subscribe を、書き直しの前に呼び出し側が
+/// 取り下げても、unsubscribe は取引所に届く (PR #27 のレビュー指摘)。
+/// 送った集合から subscribe を消してしまうと、取引所で購読が生きている
+/// 可能性があるのにどちらの集合にも残らず、unsubscribe が書かれないまま
+/// 接続の間ずっと購読が残る。
+#[tokio::test]
+async fn an_unsubscribe_after_an_anonymous_rejection_still_reaches_the_exchange() {
+    const BACKLOG: usize = 100;
+    let mock = MockExchange::start().await;
+    let ws = mock.ws();
+    let mut feed = mock.client().public_feed();
+    feed.subscribe(PublicChannel::Ticker(Symbol::ETH)).unwrap();
+    {
+        let mut next = std::pin::pin!(feed.next());
+        tokio::select! {
+            event = &mut next => panic!("no event before the subscribe: {event:?}"),
+            _ = ws.subscribed(Api::Public, "ticker", Some("ETH"), WAIT) => {}
+        }
+    }
+    let ticker = fixture("ws_public_ticker.json");
+    for _ in 0..BACKLOG {
+        ws.push(Api::Public, &ticker);
+    }
+    tokio::time::sleep(Duration::from_millis(1300)).await;
+
+    feed.subscribe(PublicChannel::Ticker(Symbol::XRP)).unwrap();
+    let deadline = Instant::now() + WAIT;
+    while !ws.commands().iter().any(|(_, _, c)| {
+        c["command"] == "subscribe" && c["channel"] == "ticker" && c["symbol"] == "XRP"
+    }) {
+        assert!(
+            Instant::now() < deadline,
+            "the XRP subscribe was never written"
+        );
+        let _ = tokio::time::timeout(Duration::from_millis(20), feed.next()).await;
+    }
+
+    // 帰属をあきらめている間の拒否。書き直しは窓の期限の後なので、その前に取り下げる。
+    ws.push(Api::Public, &fixture("live/ws_public_error.json"));
+    match tokio::time::timeout(WAIT, feed.next())
+        .await
+        .expect("the rejection never arrived")
+        .unwrap()
+    {
+        PublicEvent::Rejected { channel, .. } => assert_eq!(channel, None),
+        other => panic!("{other:?}"),
+    }
+    assert!(feed.unsubscribe(&PublicChannel::Ticker(Symbol::XRP)));
+
+    let deadline = Instant::now() + WAIT;
+    while !ws.commands().iter().any(|(_, _, c)| {
+        c["command"] == "unsubscribe" && c["channel"] == "ticker" && c["symbol"] == "XRP"
+    }) {
+        assert!(
+            Instant::now() < deadline,
+            "the unsubscribe never reached the exchange"
+        );
+        let _ = tokio::time::timeout(Duration::from_millis(20), feed.next()).await;
+    }
+    feed.close().await.unwrap();
+}
+
+/// 同じチャネルが匿名の拒否で送り直され、また匿名で拒否されたら、そこで
+/// 止める (issue #23 のレビュー指摘)。チャネル自体が無効 (ERR-5106 など) だと、
+/// 送り直すたびに拒否され、1.05 秒ごとに同じ subscribe を送り続けて IP ごとの
+/// コマンド枠を使い切る。呼び出し側が購読を呼び直せば、また 1 度だけ送り直す。
+#[tokio::test]
+async fn an_anonymous_rejection_resends_a_channel_at_most_once() {
+    const BACKLOG: usize = 100;
+    let mock = MockExchange::start().await;
+    let ws = mock.ws();
+    let mut feed = mock.client().public_feed();
+    feed.subscribe(PublicChannel::Ticker(Symbol::ETH)).unwrap();
+    {
+        let mut next = std::pin::pin!(feed.next());
+        tokio::select! {
+            event = &mut next => panic!("no event before the subscribe: {event:?}"),
+            _ = ws.subscribed(Api::Public, "ticker", Some("ETH"), WAIT) => {}
+        }
+    }
+
+    // 帰属をあきらめる入口: 窓の期限を過ぎてから読むフレームを積む。
+    let ticker = fixture("ws_public_ticker.json");
+    for _ in 0..BACKLOG {
+        ws.push(Api::Public, &ticker);
+    }
+    tokio::time::sleep(Duration::from_millis(1300)).await;
+
+    ws.reject_subscribe(
+        Api::Public,
+        "ticker",
+        "ERR-5106 Invalid request parameter. channel",
+    );
+    let xrp_subscribes = |ws: &support::WsControl| {
+        ws.commands()
+            .iter()
+            .filter(|(_, _, c)| {
+                c["command"] == "subscribe" && c["channel"] == "ticker" && c["symbol"] == "XRP"
+            })
+            .count()
+    };
+    feed.subscribe(PublicChannel::Ticker(Symbol::XRP)).unwrap();
+
+    // 購読済みの ETH のデータを流し続け、ソケットを空にしない。空を観測すると
+    // 帰属が再開してしまい、匿名の拒否による送り直しの経路を通らない。
+    // 呼び出し側は 1 イベント読むたびに少し待つので、フレームが少しずつ溜まり、
+    // 窓の期限の読み込みが空を観測しない。
+    let eth_ticker = ticker.replace("\"BTC\"", "\"ETH\"");
+    let pusher = tokio::spawn({
+        let ws = mock.ws();
+        async move {
+            loop {
+                ws.push(Api::Public, &eth_ticker);
+                tokio::time::sleep(Duration::from_millis(8)).await;
+            }
+        }
+    });
+
+    let deadline = Instant::now() + WAIT;
+    while xrp_subscribes(&ws) < 2 {
+        assert!(
+            Instant::now() < deadline,
+            "the subscribe was never sent again"
+        );
+        let _ = tokio::time::timeout(Duration::from_millis(50), feed.next()).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    // 窓の期限をもう一度越えても、3 回目は書かない。修正前は、2 度目の拒否の
+    // たびに送り直すので、この間にもう 1 回書かれる。
+    let settle = Instant::now() + Duration::from_millis(1800);
+    while Instant::now() < settle {
+        let _ = tokio::time::timeout(Duration::from_millis(50), feed.next()).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        xrp_subscribes(&ws),
+        2,
+        "an invalid channel was resent in a loop"
+    );
+
+    // 呼び出し側が購読を呼び直せば、印が消えてまた 1 度だけ送り直す。
+    feed.subscribe(PublicChannel::Ticker(Symbol::XRP)).unwrap();
+    let deadline = Instant::now() + WAIT;
+    while xrp_subscribes(&ws) < 3 {
+        assert!(
+            Instant::now() < deadline,
+            "a caller subscribe no longer sends the command"
+        );
+        let _ = tokio::time::timeout(Duration::from_millis(50), feed.next()).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    pusher.abort();
+    feed.close().await.unwrap();
+}
+
+/// 拒否の窓の期限より前には、窓を閉じる読み込みをしない (issue #23 の合格
+/// 条件 3)。あきらめた帰属でも、期限の前に空のソケットを何度観測しても窓は
+/// 閉じず、期限が来てからの一度の読み込みで初めて閉じる。閉じた後にだけ、
+/// ためておいた subscribe が書かれる。
+///
+/// 期限前に読んだ拒否は匿名の拒否として扱われるので、最後に書いた subscribe が
+/// 送った集合から外れる。期限の前に窓が閉じていれば、その拒否は遅れた拒否に
+/// なり、送り直しは起きない。送り直しの到着時刻で、窓が期限まで開いていたことと、
+/// 期限の読み込みの後でだけ書いたことが分かる。
+#[tokio::test]
+async fn an_abandoned_window_is_not_closed_by_empty_reads_before_its_deadline() {
+    const BACKLOG: usize = 100;
+    let mock = MockExchange::start().await;
+    let ws = mock.ws();
+    let mut feed = mock.client().public_feed();
+    feed.subscribe(PublicChannel::Ticker(Symbol::ETH)).unwrap();
+    {
+        let mut next = std::pin::pin!(feed.next());
+        tokio::select! {
+            event = &mut next => panic!("no event before the subscribe: {event:?}"),
+            _ = ws.subscribed(Api::Public, "ticker", Some("ETH"), WAIT) => {}
+        }
+    }
+    let ticker = fixture("ws_public_ticker.json");
+    for _ in 0..BACKLOG {
+        ws.push(Api::Public, &ticker);
+    }
+    tokio::time::sleep(Duration::from_millis(1300)).await;
+
+    let xrp_subscribes = |ws: &support::WsControl| {
+        ws.commands()
+            .iter()
+            .filter(|(_, _, c)| {
+                c["command"] == "subscribe" && c["channel"] == "ticker" && c["symbol"] == "XRP"
+            })
+            .map(|(at, _, _)| *at)
+            .collect::<Vec<_>>()
+    };
+    feed.subscribe(PublicChannel::Ticker(Symbol::XRP)).unwrap();
+    let deadline = Instant::now() + WAIT;
+    while xrp_subscribes(&ws).is_empty() {
+        assert!(
+            Instant::now() < deadline,
+            "the XRP subscribe was never written"
+        );
+        let _ = tokio::time::timeout(Duration::from_millis(20), feed.next()).await;
+    }
+    let written_at = xrp_subscribes(&ws)[0];
+
+    // 窓の期限 (書き込みから 1.05 秒) の手前まで、空のソケットのまま駆動する。
+    // 窓は閉じないので、次のコマンドも書かれない。
+    let before_deadline = written_at + Duration::from_millis(450);
+    while Instant::now() < before_deadline {
+        let _ = tokio::time::timeout(Duration::from_millis(10), feed.next()).await;
+    }
+    assert_eq!(
+        xrp_subscribes(&ws).len(),
+        1,
+        "a command was written before the window's deadline"
+    );
+
+    // 期限の前に届いた拒否は、窓が開いている間の匿名の拒否である。最後に
+    // 書いた subscribe が送った集合から外れるので、期限の後に送り直される。
+    ws.push(Api::Public, &fixture("live/ws_public_error.json"));
+    match tokio::time::timeout(WAIT, feed.next())
+        .await
+        .expect("the rejection never arrived")
+        .unwrap()
+    {
+        PublicEvent::Rejected { channel, .. } => assert_eq!(channel, None),
+        other => panic!("{other:?}"),
+    }
+
+    let deadline = Instant::now() + WAIT;
+    let resent_at = loop {
+        if let Some(at) = xrp_subscribes(&ws).get(1) {
+            break *at;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the subscribe rejected before the deadline was never sent again"
+        );
+        let _ = tokio::time::timeout(Duration::from_millis(20), feed.next()).await;
+    };
+    assert!(
+        resent_at >= written_at + Duration::from_secs(1),
+        "the command was written before the feed read the socket at the deadline: \
+         {resent_at:?} is less than 1 s after {written_at:?}"
+    );
+    feed.close().await.unwrap();
+}
+
 /// `next` を 1 回だけポーリングする。そのポーリングでは、予算を 1 単位だけ
 /// 残して使い切る。`next` が `Pending` を返したら `None`。
 ///
