@@ -691,7 +691,103 @@ async fn the_readme_recipe_reports_an_empty_lookup_as_an_error_not_a_panic() {
         .await
         .expect_err("nothing to recover");
 
-    assert!(err.to_string().contains("ERR-915"), "{err}");
+    assert!(
+        err.outcome_unknown(),
+        "the first attempt may still have been applied: {err}"
+    );
+    assert!(
+        !matches!(err, Error::Api(_)),
+        "a rejection would read as 'not applied': {err}"
+    );
+    mock.assert_done();
+}
+
+#[tokio::test]
+async fn a_rejection_on_the_resend_still_lets_the_lookup_find_the_first_order() {
+    let mock = MockExchange::start().await;
+    mock.on("POST", "/private/v1/order")
+        .times(1)
+        .reply(Reply::DropConnection);
+    mock.on("POST", "/private/v1/order")
+        .signed()
+        .times(1)
+        .reply(Reply::Json(api_error(
+            "ERR-201",
+            "The requested order exceeds the amount of available balance.",
+        )));
+    mock.on("GET", "/private/v1/orders")
+        .signed()
+        .query("clientOrderId=abc123")
+        .times(1)
+        .reply(order_with_client_id(223456789, "abc123"));
+    let client = authed(&mock);
+
+    let id = client
+        .place_order_or_recover(&limit_buy(Symbol::BTC))
+        .await
+        .expect("the first order exists");
+
+    assert_eq!(id, oid(223456789));
+    assert_eq!(mock.requests().len(), 3, "drop, rejected resend, lookup");
+    mock.assert_done();
+}
+
+#[tokio::test]
+async fn a_rejection_on_the_resend_with_an_empty_lookup_stays_outcome_unknown() {
+    let mock = MockExchange::start().await;
+    mock.on("POST", "/private/v1/order")
+        .times(1)
+        .reply(Reply::DropConnection);
+    mock.on("POST", "/private/v1/order")
+        .times(1)
+        .reply(Reply::Json(api_error(
+            "ERR-201",
+            "The requested order exceeds the amount of available balance.",
+        )));
+    mock.on("GET", "/private/v1/orders")
+        .reply(Reply::Json(r#"{"status":0,"data":{}}"#.to_owned()));
+    let client = authed(&mock);
+
+    let err = client
+        .place_order_or_recover(&limit_buy(Symbol::BTC))
+        .await
+        .expect_err("nothing to recover");
+
+    assert!(
+        err.outcome_unknown(),
+        "the first attempt may still have been applied: {err}"
+    );
+    assert!(
+        !matches!(err, Error::Api(_)),
+        "the resend's rejection must not hide the unknown first attempt: {err}"
+    );
+    assert_eq!(mock.requests().len(), 3, "drop, rejected resend, lookup");
+    mock.assert_done();
+}
+
+#[tokio::test]
+async fn a_second_drop_still_lets_the_lookup_find_the_first_order() {
+    let mock = MockExchange::start().await;
+    mock.on("POST", "/private/v1/order")
+        .times(1)
+        .reply(Reply::DropConnection);
+    mock.on("POST", "/private/v1/order")
+        .times(1)
+        .reply(Reply::DropConnection);
+    mock.on("GET", "/private/v1/orders")
+        .signed()
+        .query("clientOrderId=abc123")
+        .times(1)
+        .reply(order_with_client_id(223456789, "abc123"));
+    let client = authed(&mock);
+
+    let id = client
+        .place_order_or_recover(&limit_buy(Symbol::BTC))
+        .await
+        .expect("the first order exists");
+
+    assert_eq!(id, oid(223456789));
+    assert_eq!(mock.requests().len(), 3, "drop, drop, lookup");
     mock.assert_done();
 }
 

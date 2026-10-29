@@ -28,7 +28,7 @@ use crate::domain::{
     OrderStatus, OrderType, PositionId, Price, SettleType, Side, Size, Symbol, TimeInForce,
     Timestamp,
 };
-use crate::error::{ApiMessage, Error, ErrorCode, Postcondition, ProtocolErrorKind, Result};
+use crate::error::{ApiMessage, Postcondition, ProtocolErrorKind, Result};
 
 /// 取引所が報告する注文 (`GET /orders`、`GET /activeOrders`)。
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
@@ -584,15 +584,29 @@ impl Client<Authenticated> {
     /// 発注され、その注文 ID が `id` であることを意味する。約定したことではない。
     ///
     /// # エラー
-    /// - 1 回目が成功したとき、または 1 回目が [`Error::outcome_unknown`] の
-    ///   偽で失敗したときは、[`Client::place_order`] のエラーをそのまま返す。
-    /// - 1 回目が結果不明で、2 回目が ERR-915
-    ///   ([`ErrorCode::CLIENT_ORDER_ID_USED`]) のときは、顧客注文 ID で注文を
-    ///   照会して `Ok` を返す。
-    /// - 2 回目が ERR-915 で、照会が空のときは、その ERR-915 を
-    ///   [`Error::Api`] として返す。取引所への反映が遅れているだけなので、
-    ///   少し待って `orders(OrderLookup::ByClientOrderIds(..))` で照会し直す。
-    /// - 照会が失敗したときは、そのエラーを返す。
+    /// - 1 回目が成功したときは `Ok`。1 回目が
+    ///   [`Error::outcome_unknown`](crate::error::Error::outcome_unknown) の偽で
+    ///   失敗したときは、[`Client::place_order`] のエラーをそのまま返す。
+    /// - 1 回目が結果不明なら、同じ注文を再送する。2 回目が成功したら `Ok`。
+    /// - 2 回目が失敗したら、ERR-915
+    ///   ([`ErrorCode::CLIENT_ORDER_ID_USED`](crate::error::ErrorCode::CLIENT_ORDER_ID_USED))
+    ///   かどうかにかかわらず、顧客注文 ID で注文を照会する。見つかればその
+    ///   注文 ID を `Ok` で返す。
+    /// - 照会が空で、2 回目が取引所の拒否
+    ///   ([`Error::Api`](crate::error::Error::Api)、ERR-915 を含む) だったときは、
+    ///   1 回目のエラーを返す。これは
+    ///   [`Error::outcome_unknown`](crate::error::Error::outcome_unknown) が真なので、
+    ///   1 回目が適用されたかどうかはまだ分からない。取引所への反映が遅れて
+    ///   いるだけかもしれないので、少し待って
+    ///   `orders(OrderLookup::ByClientOrderIds(..))` で照会し直す。2 回目の
+    ///   Api エラーを返すと「適用されていない」と読めてしまうので返さない。
+    /// - 照会が空で、2 回目も結果不明だったときは、2 回目のエラーを返す
+    ///   ([`Error::outcome_unknown`](crate::error::Error::outcome_unknown) は真)。
+    ///   2 回目が
+    ///   [`Error::accepted_but_unreadable`](crate::error::Error::accepted_but_unreadable)
+    ///   なら発注は確定している。反映が遅れているだけなので、少し待って
+    ///   照会し直す。
+    /// - 照会そのものが失敗したときは、そのエラーを返す。
     ///
     /// # 例
     /// ```no_run
@@ -615,23 +629,27 @@ impl Client<Authenticated> {
     /// # Ok(()) }
     /// ```
     pub async fn place_order_or_recover(&self, order: &NewOrder) -> Result<OrderId> {
-        match self.place_order(order).await {
-            Ok(id) => Ok(id),
-            Err(first) if first.outcome_unknown() => match self.place_order(order).await {
-                Ok(id) => Ok(id),
-                Err(Error::Api(api)) if api.has(ErrorCode::CLIENT_ORDER_ID_USED) => {
-                    let lookup =
-                        OrderLookup::ByClientOrderIds(Batch::one(order.client_order_id.clone()));
-                    match self.orders(&lookup).await?.first() {
-                        Some(found) => Ok(found.order_id),
-                        // ERR-915 の直後でも照会が空になる。呼び出し側は少し待って
-                        // 照会し直せるよう、ERR-915 をそのまま返す。
-                        None => Err(Error::Api(api)),
-                    }
-                }
-                Err(e) => Err(e),
-            },
-            Err(e) => Err(e),
+        let first = match self.place_order(order).await {
+            Ok(id) => return Ok(id),
+            Err(e) => e,
+        };
+        if !first.outcome_unknown() {
+            return Err(first);
+        }
+        let second = match self.place_order(order).await {
+            Ok(id) => return Ok(id),
+            Err(e) => e,
+        };
+        // 2 回目が ERR-915 以外の拒否でも、1 回目が適用されている可能性は
+        // 残る。読み取りだけの照会で確かめる。
+        let lookup = OrderLookup::ByClientOrderIds(Batch::one(order.client_order_id.clone()));
+        let found = self.orders(&lookup).await?;
+        match found.first() {
+            Some(order) => Ok(order.order_id),
+            // 2 回目が拒否されたなら、1 回目の結果不明を返す。2 回目の Api
+            // エラーを返すと「適用されていない」と読めてしまう。
+            None if !second.outcome_unknown() => Err(first),
+            None => Err(second),
         }
     }
 
