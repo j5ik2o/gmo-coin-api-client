@@ -6,7 +6,29 @@ rust-version = "1.99.1"
 description = "GMOコインの暗号資産取引API (Public/Private REST と WebSocket) を呼び出す非同期クライアント"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/j5ik2o/gmo-coin-api-client"
-publish = false
+homepage = "https://github.com/j5ik2o/gmo-coin-api-client"
+documentation = "https://docs.rs/gmo-coin-api-client"
+readme = "README.md"
+keywords = ["gmo", "cryptocurrency", "exchange", "trading", "websocket"]
+categories = [
+    "api-bindings",
+    "asynchronous",
+    "cryptography::cryptocurrencies",
+    "finance",
+    "web-programming::websocket",
+]
+# リポジトリ専用のファイルは crates.io のパッケージに載せない。
+exclude = [
+    "/.github",
+    "/.gitignore",
+    "/AGENTS.md",
+    "/CLAUDE.md",
+    "/clippy.toml",
+    "/deny.toml",
+    "/renovate.json",
+    "/rust-toolchain.toml",
+    "/tools",
+]
 
 [dependencies]
 tokio = { version = "1.54", default-features = false, features = ["net", "time", "io-util", "macros", "rt", "sync"] }
