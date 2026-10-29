@@ -5,6 +5,7 @@
 //! `PUT`、`DELETE`、identity エンコーディング (`Accept-Encoding` は送らない)。
 //! パイプライン、`Expect: 100-continue`、HTTP/2 はない。
 
+use core::num::NonZeroU8;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -12,6 +13,7 @@ use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
 use hyper::client::conn::http1::SendRequest;
 use hyper_util::rt::TokioIo;
+use tokio::sync::{Semaphore, SemaphorePermit};
 use zeroize::Zeroizing;
 
 use super::{Connector, io_kind};
@@ -61,20 +63,29 @@ pub(crate) struct Response {
 /// このハンドルが drop されると接続を閉じる。
 type Sender = SendRequest<Full<Bytes>>;
 
-/// 1 つの REST ベースのアイドル接続。
+/// 1 つの REST ベースのアイドル接続と、送信中リクエスト数の上限。
 ///
-/// 共有ではなく所有である。リクエストは接続を取り出し、やり取りの間ずっと
-/// 排他的に所有し、応答を完全に読み終えて接続が閉じていないときだけ戻す。
-/// 2 つのリクエストが同時に 1 本の接続を使うことはない。`Mutex` が守るのは
-/// アイドルスタックの push と pop だけで、`.await` をまたいで保持されない
-/// `std` のミューテックスである。
+/// 接続は共有ではなく所有である。リクエストは接続を取り出し、やり取りの間
+/// ずっと排他的に所有し、応答を完全に読み終えて接続が閉じていないときだけ
+/// 戻す。2 つのリクエストが同時に 1 本の接続を使うことはない。`Mutex` が
+/// 守るのはアイドルスタックの push と pop だけで、`.await` をまたいで保持
+/// されない `std` のミューテックスである。
+///
+/// 新しく接続を開くのは、同時に処理しているリクエストの中だけである。
+/// 送信中リクエストを `max_inflight` 件に絞るので、同時に開く接続、TLS
+/// ハンドシェイク、hyper の接続タスクもその本数を超えない。
 ///
 /// # 不変条件
-/// `idle.len() <= max_idle`。`IDLE_TTL` より古い項目は取り出し時に捨てられ、
-/// 決して再利用されない。
+/// - `idle.len() <= max_idle`。`IDLE_TTL` より古い項目は取り出し時に捨てられ、
+///   決して再利用されない。
+/// - 同時に処理しているリクエスト (接続の取り出しから応答の読み終えまで、
+///   再試行を含む) は `max_inflight` 件以下。
+/// - 生きている接続は、アイドルスタックにあるか 1 件のリクエストが所有する
+///   かのどちらか。したがってその本数は `max(max_idle, max_inflight)` 以下。
 pub(crate) struct Pool {
     idle: Mutex<Vec<(Sender, Instant)>>,
     max_idle: u8,
+    inflight: Semaphore,
 }
 
 impl Pool {
@@ -82,11 +93,28 @@ impl Pool {
     /// された接続が再利用時に既にサーバ側で閉じられていることは稀になる。
     pub(crate) const IDLE_TTL: Duration = Duration::from_secs(15);
 
-    pub(crate) fn new(max_idle: u8) -> Self {
+    pub(crate) fn new(max_idle: u8, max_inflight: NonZeroU8) -> Self {
         Self {
             idle: Mutex::new(Vec::new()),
             max_idle,
+            inflight: Semaphore::new(usize::from(max_inflight.get())),
         }
+    }
+
+    /// 送信中リクエスト 1 件分の許可を取る。上限に達していれば、どれかが
+    /// 終わるまで待つ。
+    ///
+    /// # パニック
+    /// このクレートはセマフォを閉じないので起きない。
+    #[expect(
+        clippy::expect_used,
+        reason = "このセマフォを閉じる経路がないので、acquire の失敗は起きない"
+    )]
+    async fn enter(&self) -> SemaphorePermit<'_> {
+        self.inflight
+            .acquire()
+            .await
+            .expect("the inflight semaphore is never closed")
     }
 
     fn checkout(&self) -> Option<Sender> {
@@ -137,6 +165,10 @@ enum Attempt {
 /// やり取り全体は `config.timeouts.request` に収める。
 ///
 /// # 事後条件
+/// - 同時に処理しているリクエストは `Limits::max_inflight_requests` 件以下。
+///   上限に達している呼び出しは許可を待つ。この待ちは `config.timeouts` の
+///   どの値にも収まらないが、既に並んでいる呼び出しはそれぞれ最大
+///   `timeouts.request` で終わるので、その件数で有界になる。
 /// - `Delivery::NotSent` の `Err` は、リクエストのバイトが 1 つも書かれて
 ///   いないときだけ。hyper がリクエストを書き始めた後の失敗はすべて `MaybeSent`。
 /// - 再利用した接続で、リクエストが書かれる前に失敗したら、メソッドを問わず
@@ -157,6 +189,9 @@ pub(crate) async fn round_trip(
         delivery,
     };
     let max_body = config.limits.max_response_bytes.get();
+    // 許可は、接続の取り出しから応答の読み終えまで、再試行を含む往復の
+    // 間ずっと保持し、戻るときに返す。
+    let _inflight = route.pool.enter().await;
     let mut retried = false;
     loop {
         let pooled = if retried { None } else { route.pool.checkout() };
