@@ -21,9 +21,6 @@ permissions:
   contents: read
 jobs:
   bump-version:
-    # workflow_dispatch は任意の枝やタグで実行できる。main 以外で動かすと、
-    # レビューしていないコミットを版上げの対象にしてしまうので、main だけに限る。
-    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: write

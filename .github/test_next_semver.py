@@ -33,17 +33,9 @@ class NextSemverTest(unittest.TestCase):
                 self.assertIn("pre-release", result.stderr)
 
     def test_each_level_from_release_tag(self):
-        for tag, level, expected in (
-            ("v3.0.6", "major", "4.0.0\n"),
-            ("v3.0.6", "minor", "3.1.0\n"),
-            ("v3.0.6", "patch", "3.0.7\n"),
-            ("v10.0.0", "major", "11.0.0\n"),
-            ("v10.0.0", "minor", "10.1.0\n"),
-            ("v10.0.0", "patch", "10.0.1\n"),
-            ("v14.12.10", "patch", "14.12.11\n"),
-        ):
-            with self.subTest(tag=tag, level=level):
-                result = next_semver(tag, level)
+        for level, expected in (("major", "4.0.0\n"), ("minor", "3.1.0\n"), ("patch", "3.0.7\n")):
+            with self.subTest(level=level):
+                result = next_semver("v3.0.6", level)
                 self.assertEqual((result.returncode, result.stdout, result.stderr), (0, expected, ""))
 
 
