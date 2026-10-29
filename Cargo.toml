@@ -26,6 +26,7 @@ exclude = [
     "/CLAUDE.md",
     "/clippy.toml",
     "/deny.toml",
+    "/docs",
     "/renovate.json",
     "/rust-toolchain.toml",
     "/tests",
