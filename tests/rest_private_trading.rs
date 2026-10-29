@@ -627,6 +627,206 @@ async fn a_dropped_connection_leaves_the_order_outcome_unknown_and_the_resend_ke
     mock.assert_done();
 }
 
+fn order_with_client_id(order_id: u64, client_order_id: &str) -> Reply {
+    Reply::Json(
+        json!({"status": 0, "data": {"list": [{
+            "orderId": order_id, "clientOrderId": client_order_id, "rootOrderId": order_id,
+            "symbol": "BTC", "side": "BUY", "orderType": "NORMAL", "executionType": "LIMIT",
+            "settleType": "OPEN", "size": "0.02", "executedSize": "0", "price": "1430001",
+            "losscutPrice": "0", "status": "ORDERED", "timeInForce": "FAS",
+            "timestamp": "2020-10-14T20:18:59.343Z"
+        }]}})
+        .to_string(),
+    )
+}
+
+#[tokio::test]
+async fn the_readme_recipe_recovers_the_order_id_after_a_drop_and_err_915() {
+    let mock = MockExchange::start().await;
+    mock.on("POST", "/private/v1/order")
+        .times(1)
+        .reply(Reply::DropConnection);
+    mock.on("POST", "/private/v1/order")
+        .signed()
+        .times(1)
+        .reply(Reply::Json(api_error(
+            "ERR-915",
+            "The clientOrderId was already used.",
+        )));
+    mock.on("GET", "/private/v1/orders")
+        .signed()
+        .query("clientOrderId=abc123")
+        .times(1)
+        .reply(order_with_client_id(223456789, "abc123"));
+    let client = authed(&mock);
+
+    let id = client
+        .place_order_or_recover(&limit_buy(Symbol::BTC))
+        .await
+        .expect("recovered");
+
+    assert_eq!(id, oid(223456789));
+    assert_eq!(mock.requests().len(), 3, "drop, resend, lookup");
+    mock.assert_done();
+}
+
+#[tokio::test]
+async fn the_readme_recipe_reports_an_empty_lookup_as_an_error_not_a_panic() {
+    let mock = MockExchange::start().await;
+    mock.on("POST", "/private/v1/order")
+        .times(1)
+        .reply(Reply::DropConnection);
+    mock.on("POST", "/private/v1/order")
+        .times(1)
+        .reply(Reply::Json(api_error(
+            "ERR-915",
+            "The clientOrderId was already used.",
+        )));
+    mock.on("GET", "/private/v1/orders")
+        .reply(Reply::Json(r#"{"status":0,"data":{}}"#.to_owned()));
+    let client = authed(&mock);
+
+    let err = client
+        .place_order_or_recover(&limit_buy(Symbol::BTC))
+        .await
+        .expect_err("nothing to recover");
+
+    assert!(
+        err.outcome_unknown(),
+        "the first attempt may still have been applied: {err}"
+    );
+    assert!(
+        !matches!(err, Error::Api(_)),
+        "a rejection would read as 'not applied': {err}"
+    );
+    mock.assert_done();
+}
+
+#[tokio::test]
+async fn a_failed_lookup_stays_outcome_unknown_instead_of_reporting_the_lookup_error() {
+    let mock = MockExchange::start().await;
+    mock.on("POST", "/private/v1/order")
+        .times(1)
+        .reply(Reply::DropConnection);
+    mock.on("POST", "/private/v1/order")
+        .times(1)
+        .reply(Reply::Json(api_error(
+            "ERR-915",
+            "The clientOrderId was already used.",
+        )));
+    mock.on("GET", "/private/v1/orders")
+        .signed()
+        .query("clientOrderId=abc123")
+        .times(1)
+        .reply(Reply::Json(api_error("ERR-5003", "Requests are too many.")));
+    let client = authed(&mock);
+
+    let err = client
+        .place_order_or_recover(&limit_buy(Symbol::BTC))
+        .await
+        .expect_err("nothing to recover");
+
+    assert!(
+        err.outcome_unknown(),
+        "the first attempt may still have been applied: {err}"
+    );
+    assert!(
+        !matches!(err, Error::Api(_)),
+        "the lookup's rejection must not hide the unknown first attempt: {err}"
+    );
+    assert_eq!(mock.requests().len(), 3, "drop, resend, failed lookup");
+    mock.assert_done();
+}
+
+#[tokio::test]
+async fn a_rejection_on_the_resend_still_lets_the_lookup_find_the_first_order() {
+    let mock = MockExchange::start().await;
+    mock.on("POST", "/private/v1/order")
+        .times(1)
+        .reply(Reply::DropConnection);
+    mock.on("POST", "/private/v1/order")
+        .signed()
+        .times(1)
+        .reply(Reply::Json(api_error(
+            "ERR-201",
+            "The requested order exceeds the amount of available balance.",
+        )));
+    mock.on("GET", "/private/v1/orders")
+        .signed()
+        .query("clientOrderId=abc123")
+        .times(1)
+        .reply(order_with_client_id(223456789, "abc123"));
+    let client = authed(&mock);
+
+    let id = client
+        .place_order_or_recover(&limit_buy(Symbol::BTC))
+        .await
+        .expect("the first order exists");
+
+    assert_eq!(id, oid(223456789));
+    assert_eq!(mock.requests().len(), 3, "drop, rejected resend, lookup");
+    mock.assert_done();
+}
+
+#[tokio::test]
+async fn a_rejection_on_the_resend_with_an_empty_lookup_stays_outcome_unknown() {
+    let mock = MockExchange::start().await;
+    mock.on("POST", "/private/v1/order")
+        .times(1)
+        .reply(Reply::DropConnection);
+    mock.on("POST", "/private/v1/order")
+        .times(1)
+        .reply(Reply::Json(api_error(
+            "ERR-201",
+            "The requested order exceeds the amount of available balance.",
+        )));
+    mock.on("GET", "/private/v1/orders")
+        .reply(Reply::Json(r#"{"status":0,"data":{}}"#.to_owned()));
+    let client = authed(&mock);
+
+    let err = client
+        .place_order_or_recover(&limit_buy(Symbol::BTC))
+        .await
+        .expect_err("nothing to recover");
+
+    assert!(
+        err.outcome_unknown(),
+        "the first attempt may still have been applied: {err}"
+    );
+    assert!(
+        !matches!(err, Error::Api(_)),
+        "the resend's rejection must not hide the unknown first attempt: {err}"
+    );
+    assert_eq!(mock.requests().len(), 3, "drop, rejected resend, lookup");
+    mock.assert_done();
+}
+
+#[tokio::test]
+async fn a_second_drop_still_lets_the_lookup_find_the_first_order() {
+    let mock = MockExchange::start().await;
+    mock.on("POST", "/private/v1/order")
+        .times(1)
+        .reply(Reply::DropConnection);
+    mock.on("POST", "/private/v1/order")
+        .times(1)
+        .reply(Reply::DropConnection);
+    mock.on("GET", "/private/v1/orders")
+        .signed()
+        .query("clientOrderId=abc123")
+        .times(1)
+        .reply(order_with_client_id(223456789, "abc123"));
+    let client = authed(&mock);
+
+    let id = client
+        .place_order_or_recover(&limit_buy(Symbol::BTC))
+        .await
+        .expect("the first order exists");
+
+    assert_eq!(id, oid(223456789));
+    assert_eq!(mock.requests().len(), 3, "drop, drop, lookup");
+    mock.assert_done();
+}
+
 #[tokio::test]
 async fn a_stalled_exchange_also_leaves_the_order_outcome_unknown() {
     let mock = MockExchange::start().await;

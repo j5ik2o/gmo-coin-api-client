@@ -540,8 +540,8 @@ impl Client<Authenticated> {
     ///   読めなかった `Protocol`): 同じ `NewOrder` (同じ `client_order_id`) を
     ///   再送する。発注されるのは高々一度で、最初の試行が発注されていれば
     ///   再送は ERR-915 で拒否される。`accepted_but_unreadable()` も真なら
-    ///   発注は確定しているので、再送せずに照会してよい。再送と照会を 1 つの
-    ///   手順にまとめた例は、README の「注文を出す」にある。
+    ///   発注は確定しているので、再送せずに照会してよい。
+    ///   再送と照会をまとめて行う [`Client::place_order_or_recover`] もある。
     ///
     /// # 例
     /// ```no_run
@@ -567,6 +567,98 @@ impl Client<Authenticated> {
         order.check()?;
         let call = Call::new(endpoint!(POST "/v1/order")).json(&order.wire());
         self.private(call).await?.data()
+    }
+
+    /// [`Client::place_order`] を送り、結果が分からないときは同じ注文をもう
+    /// 一度送り、それでも決まらなければ顧客注文 ID で照会して、発注された
+    /// 注文の ID を返す。取引所の操作を増やすものではない。
+    ///
+    /// この再送と照会の手順はここにだけある。README の「注文を出す」の例も
+    /// このメソッドを呼ぶ。
+    ///
+    /// # 事前条件
+    /// [`NewOrder`] が保証する ([`Client::place_order`] と同じ)。
+    ///
+    /// # 事後条件
+    /// `Ok(id)` は、`order.client_order_id` の注文が取引所に高々 1 回だけ
+    /// 発注され、その注文 ID が `id` であることを意味する。約定したことではない。
+    ///
+    /// # エラー
+    /// - 1 回目が成功したときは `Ok`。1 回目が
+    ///   [`Error::outcome_unknown`](crate::error::Error::outcome_unknown) の偽で
+    ///   失敗したときは、[`Client::place_order`] のエラーをそのまま返す。
+    /// - 1 回目が結果不明なら、同じ注文を再送する。2 回目が成功したら `Ok`。
+    /// - 2 回目が失敗したら、ERR-915
+    ///   ([`ErrorCode::CLIENT_ORDER_ID_USED`](crate::error::ErrorCode::CLIENT_ORDER_ID_USED))
+    ///   かどうかにかかわらず、顧客注文 ID で注文を照会する。見つかればその
+    ///   注文 ID を `Ok` で返す。
+    /// - 照会が空で、2 回目が取引所の拒否
+    ///   ([`Error::Api`](crate::error::Error::Api)、ERR-915 を含む) だったときは、
+    ///   1 回目のエラーを返す。これは
+    ///   [`Error::outcome_unknown`](crate::error::Error::outcome_unknown) が真なので、
+    ///   1 回目が適用されたかどうかはまだ分からない。取引所への反映が遅れて
+    ///   いるだけかもしれないので、少し待って
+    ///   `orders(OrderLookup::ByClientOrderIds(..))` で照会し直す。2 回目の
+    ///   Api エラーを返すと「適用されていない」と読めてしまうので返さない。
+    /// - 照会が空で、2 回目も結果不明だったときは、2 回目のエラーを返す
+    ///   ([`Error::outcome_unknown`](crate::error::Error::outcome_unknown) は真)。
+    ///   2 回目が
+    ///   [`Error::accepted_but_unreadable`](crate::error::Error::accepted_but_unreadable)
+    ///   なら発注は確定している。反映が遅れているだけなので、少し待って
+    ///   照会し直す。
+    /// - 照会そのものが失敗したときは、照会のエラーを捨て、照会が空だった
+    ///   ときと同じ規則で 1 回目か 2 回目のエラーを返す。照会のエラー
+    ///   (流量制限の ERR-5003 など) をそのまま返すと
+    ///   [`Error::outcome_unknown`](crate::error::Error::outcome_unknown) が偽になり、
+    ///   「注文が拒否された＝発注されていない」と読めてしまうため。
+    ///
+    /// # 例
+    /// ```no_run
+    /// # async fn run(client: gmo_coin_api_client::Client<gmo_coin_api_client::Authenticated>) -> gmo_coin_api_client::Result<()> {
+    /// use gmo_coin_api_client::rest::{NewOrder, OrderExecution};
+    /// use gmo_coin_api_client::{ClientOrderId, LimitTimeInForce, OrderPrice, OrderSize, Side, Symbol};
+    /// let order = NewOrder {
+    ///     client_order_id: ClientOrderId::generate(),
+    ///     symbol: Symbol::BTC,
+    ///     side: Side::Buy,
+    ///     size: OrderSize::parse("0.001")?,
+    ///     execution: OrderExecution::Limit {
+    ///         price: OrderPrice::parse("9000000")?,
+    ///         time_in_force: LimitTimeInForce::Fas,
+    ///         losscut_price: None,
+    ///     },
+    /// };
+    /// let id = client.place_order_or_recover(&order).await?;
+    /// println!("{id}");
+    /// # Ok(()) }
+    /// ```
+    pub async fn place_order_or_recover(&self, order: &NewOrder) -> Result<OrderId> {
+        let first = match self.place_order(order).await {
+            Ok(id) => return Ok(id),
+            Err(e) => e,
+        };
+        if !first.outcome_unknown() {
+            return Err(first);
+        }
+        let second = match self.place_order(order).await {
+            Ok(id) => return Ok(id),
+            Err(e) => e,
+        };
+        // 2 回目が ERR-915 以外の拒否でも、1 回目が適用されている可能性は
+        // 残る。読み取りだけの照会で確かめる。
+        let lookup = OrderLookup::ByClientOrderIds(Batch::one(order.client_order_id.clone()));
+        let found = match self.orders(&lookup).await {
+            Ok(orders) => orders.first().map(|order| order.order_id),
+            // 照会のエラーをそのまま返すと、拒否 (Error::Api) なら
+            // 「注文が適用されていない」と読めてしまう。照会は読むだけなので、
+            // 注文の結果は 1 回目か 2 回目のエラーで決める。
+            Err(_) => None,
+        };
+        match found {
+            Some(id) => Ok(id),
+            None if second.outcome_unknown() => Err(second),
+            None => Err(first),
+        }
     }
 
     /// `POST /private/v1/changeOrder`。
