@@ -1,0 +1,187 @@
+name: lib-bump-version
+on:
+  workflow_dispatch:
+    inputs:
+      level:
+        description: Version bump level
+        type: choice
+        required: true
+        default: auto
+        options:
+          - auto
+          - patch
+          - minor
+          - major
+      version:
+        description: Exact next version (X.Y.Z); when set, level is ignored. Required for the first release, when no v* tag exists yet.
+        type: string
+        required: false
+        default: ''
+jobs:
+  bump-version:
+    runs-on: ubuntu-latest
+    env:
+      PACKAGE_ID: gmo-coin-api-client
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+          token: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+      - uses: baptiste0928/cargo-install@8195d4f734a149db85385bb4102b42efcd373759 # v3
+        with:
+          crate: cargo-edit
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.15'
+      - id: defines
+        run: |
+          set -euo pipefail
+          LATEST_TAG=$(git describe --abbrev=0 --tags 2>/dev/null || true)
+          echo "LATEST_TAG=$LATEST_TAG"
+          echo "package_id=$PACKAGE_ID" >> "$GITHUB_OUTPUT"
+          echo "prev_tag=$LATEST_TAG" >> "$GITHUB_OUTPUT"
+          if [[ -n "$LATEST_TAG" ]]; then
+            echo "has_prev_tag=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_prev_tag=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Require an explicit version for the first release
+        if: inputs.version == '' && steps.defines.outputs.has_prev_tag == 'false'
+        run: |
+          echo "::error::no v* tag exists yet, so the first release needs version set to the current crate version (for example 0.1.0)"
+          exit 1
+      - name: Refuse a non-major bump while the version is a pre-release
+        if: inputs.version == '' && steps.defines.outputs.has_prev_tag == 'true'
+        env:
+          REQUESTED_LEVEL: ${{ inputs.level }}
+        run: |
+          CURRENT_VERSION=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
+          echo "CURRENT_VERSION=$CURRENT_VERSION"
+          if [[ "$CURRENT_VERSION" == *-* && "$REQUESTED_LEVEL" != "major" ]]; then
+            echo "::error::Cargo.toml has the pre-release version $CURRENT_VERSION; only level=major may bump it (requested: $REQUESTED_LEVEL)"
+            exit 1
+          fi
+      - run: pip install semver
+      - name: Validate the requested version
+        id: requested_version
+        if: inputs.version != ''
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+          HAS_PREV_TAG: ${{ steps.defines.outputs.has_prev_tag }}
+        run: |
+          set -o pipefail
+          if [[ "$HAS_PREV_TAG" == "true" ]]; then
+            VERSION=$(git tag -l 'v*' | sort -V | python3 "${GITHUB_WORKSPACE}"/.github/validate-version.py "$REQUESTED_VERSION")
+          else
+            CURRENT_VERSION=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
+            if [[ "$REQUESTED_VERSION" != "$CURRENT_VERSION" ]]; then
+              echo "::error::no v* tag exists yet, so the first release must use the current crate version $CURRENT_VERSION (requested: $REQUESTED_VERSION)"
+              exit 1
+            fi
+            VERSION="$REQUESTED_VERSION"
+          fi
+          echo "VERSION=$VERSION"
+          echo "value=$VERSION" >> "$GITHUB_OUTPUT"
+      - name: Calculate changes from the latest tag to HEAD
+        id: changes
+        if: steps.defines.outputs.has_prev_tag == 'true'
+        run: |
+          COUNT=$(git log ${{ steps.defines.outputs.prev_tag }}..HEAD --pretty=format:"%s" \
+            --no-merges -P --grep='^(BREAKING CHANGE|BREAKING-CHANGE|build|ci|feat|fix|docs|style|refactor|perf|test|revert|chore)(\(.*\))?!?:' \
+            | awk 'END{print NR}')
+          echo "COUNT=$COUNT"
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+      - name: Calculate semver level
+        id: semver_level
+        env:
+          REQUESTED_LEVEL: ${{ inputs.level }}
+          HAS_PREV_TAG: ${{ steps.defines.outputs.has_prev_tag }}
+        run: |
+          if [[ "$HAS_PREV_TAG" != "true" ]]; then
+            exit 0
+          fi
+          if [[ "$REQUESTED_LEVEL" != "auto" ]]; then
+            echo "value=$REQUESTED_LEVEL" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          SEMVER_LEVEL=$(git log ${{ steps.defines.outputs.prev_tag }}..HEAD --pretty=format:"%s%x1f%b%x1e" \
+            --no-merges -P --grep='^(BREAKING CHANGE|BREAKING-CHANGE|build|ci|feat|fix|docs|style|refactor|perf|test|revert|chore)(\(.*\))?!?:' \
+            | python3 "${GITHUB_WORKSPACE}"/.github/semver-level.py)
+          echo "SEMVER_LEVEL=$SEMVER_LEVEL"
+          echo "value=$SEMVER_LEVEL" >> "$GITHUB_OUTPUT"
+        if: inputs.version == '' && (steps.changes.outputs.count > 0 || inputs.level != 'auto')
+      - name: Get the next version
+        id: versions
+        env:
+          REQUESTED_VERSION: ${{ steps.requested_version.outputs.value }}
+        run: |
+          if [[ -n "$REQUESTED_VERSION" ]]; then
+            NEXT_VERSION="$REQUESTED_VERSION"
+          else
+            NEXT_VERSION=$(echo ${{ steps.defines.outputs.prev_tag }} | python3 "${GITHUB_WORKSPACE}"/.github/next-semver.py ${{ steps.semver_level.outputs.value }})
+          fi
+          echo "NEXT_VERSION=$NEXT_VERSION"
+          echo "next_version=$NEXT_VERSION" >> "$GITHUB_OUTPUT"
+          echo "next_tag=v$NEXT_VERSION" >> "$GITHUB_OUTPUT"
+        if: inputs.version != '' || steps.semver_level.outputs.value != ''
+      - name: bump version
+        id: bump
+        env:
+          NEXT_VERSION: ${{ steps.versions.outputs.next_version }}
+        run: |
+          CURRENT_VERSION=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
+          if [[ "$NEXT_VERSION" == "$CURRENT_VERSION" ]]; then
+            echo "Cargo.toml is already at $NEXT_VERSION; tagging without a version commit."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          cargo set-version -p ${{ steps.defines.outputs.package_id }} "$NEXT_VERSION"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+        if: inputs.version != '' || steps.semver_level.outputs.value != ''
+      - name: git commit & push
+        id: git_commit_push
+        run: |
+          git config --global user.email "j5ik2o@gmail.com"
+          git config --global user.name "Junichi Kato"
+          git diff
+          git add .
+          git commit -m "chore(release): ${{ steps.versions.outputs.next_tag }}"
+          git push origin main
+          COMMIT_SHA=$(git rev-parse HEAD)
+          echo "commit_sha=$COMMIT_SHA" >> "$GITHUB_OUTPUT"
+        if: (inputs.version != '' || steps.semver_level.outputs.value != '') && steps.bump.outputs.changed == 'true'
+      - name: tagging and push tag
+        id: tag_version
+        env:
+          PREV_TAG: ${{ steps.defines.outputs.prev_tag }}
+          NEXT_TAG: ${{ steps.versions.outputs.next_tag }}
+          HAS_PREV_TAG: ${{ steps.defines.outputs.has_prev_tag }}
+        run: |
+          set -euo pipefail
+          TAG_TARGET=$(git rev-parse HEAD)
+          git tag -a "$NEXT_TAG" "$TAG_TARGET" -m "$NEXT_TAG"
+          git push origin "$NEXT_TAG"
+          python3 "${GITHUB_WORKSPACE}"/.github/create-release-note-header.py \
+            ${{ github.server_url }} \
+            ${{ github.repository }} \
+            "$PREV_TAG" \
+            "$NEXT_TAG" \
+            > changelog.txt
+          if [[ "$HAS_PREV_TAG" == "true" ]]; then
+            git log "$PREV_TAG".."$NEXT_TAG" --no-merges --format='%H%x1f%s%x1f%b%x1e' \
+              | python3 "${GITHUB_WORKSPACE}"/.github/create-release-note-body.py "${{ github.server_url }}" "${{ github.repository }}" >> changelog.txt
+          else
+            git log "$NEXT_TAG" --no-merges --format='%H%x1f%s%x1f%b%x1e' \
+              | python3 "${GITHUB_WORKSPACE}"/.github/create-release-note-body.py "${{ github.server_url }}" "${{ github.repository }}" >> changelog.txt
+          fi
+        if: inputs.version != '' || steps.semver_level.outputs.value != ''
+      - name: Create a GitHub release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+        with:
+          tag_name: ${{ steps.versions.outputs.next_tag }}
+          release_name: Release ${{ steps.versions.outputs.next_tag }}
+          body_path: changelog.txt
+        if: inputs.version != '' || steps.semver_level.outputs.value != ''
